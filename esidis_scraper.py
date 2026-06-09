@@ -1,18 +1,27 @@
 """
-ΕΣΗΔΗΣ CPV Scraper — GitHub Actions edition
-Τρέχει αυτόματα κάθε 5 ώρες στους servers του GitHub.
-Αποθηκεύει αποτελέσματα σε results.json (commit στο repo).
+ΕΣΗΔΗΣ CPV Scraper — Selenium edition
+Χρησιμοποιεί headless Chrome για να αναζητά διαγωνισμούς ανά CPV.
+Τρέχει αυτόματα στο GitHub Actions κάθε 5 ώρες.
 """
 
-import requests
-from bs4 import BeautifulSoup
 import json
-import re
-import time
 import logging
+import re
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException, StaleElementReferenceException
+)
 
 # ─── CPV Codes ────────────────────────────────────────────────────────────────
 
@@ -27,30 +36,18 @@ CPV_CODES = [
     "79341400-0", "79342200-5", "79342321-9", "79993100-2", "80533100-0",
 ]
 
-# ─── URLs ΕΣΗΔΗΣ ──────────────────────────────────────────────────────────────
-# Δημόσια αναζήτηση — δοκιμάζουμε διαδοχικά endpoints
-SEARCH_ENDPOINTS = [
-    "https://www.eprocurement.gov.gr/actSearch/faces/non_logged_in_search_tenders.jspx",
-    "https://www.eprocurement.gov.gr/actSearch/faces/search_tenders.jspx",
-]
+SEARCH_URL = (
+    "https://www.eprocurement.gov.gr"
+    "/actSearch/faces/non_logged_in_search_tenders.jspx"
+)
 
 RESULTS_FILE = Path("results.json")
 LOG_FILE     = Path("scraper.log")
-REQUEST_DELAY = 3   # δευτερόλεπτα μεταξύ requests (ευγένεια στον server)
-MAX_PAGES     = 5
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "el-GR,el;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Referer": "https://www.eprocurement.gov.gr/",
-}
+PAGE_TIMEOUT = 30    # δευτερόλεπτα αναμονής για φόρτωση σελίδας
+BETWEEN_CPV  = 3     # δευτερόλεπτα μεταξύ CPV αναζητήσεων
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -61,6 +58,26 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+
+
+# ─── Chrome setup ─────────────────────────────────────────────────────────────
+
+def make_driver() -> webdriver.Chrome:
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--lang=el-GR")
+    opts.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+    # Χρησιμοποιεί το pre-installed Chrome στο GitHub Actions ubuntu-latest
+    service = Service()
+    return webdriver.Chrome(service=service, options=opts)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -85,181 +102,314 @@ def save_results(tenders: dict) -> None:
     payload = {
         "last_updated": datetime.now().isoformat(),
         "total": len(active),
-        "tenders": sorted(active.values(), key=lambda x: x.get("deadline") or "9999-12-31"),
+        "tenders": sorted(
+            active.values(),
+            key=lambda x: x.get("deadline") or "9999-12-31"
+        ),
     }
     with open(RESULTS_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     log.info(f"Αποθηκεύτηκαν {len(active)} διαγωνισμοί → {RESULTS_FILE}")
 
 
-def clean_budget(raw: str) -> str:
-    if not raw:
-        return "—"
-    raw = re.sub(r"[€\s]", "", raw.strip())
-    # Ελληνική μορφή: 1.234,56 → 1234.56
-    if re.search(r"\d\.\d{3},\d{2}", raw):
-        raw = raw.replace(".", "").replace(",", ".")
-    elif "," in raw and "." not in raw:
-        raw = raw.replace(",", ".")
-    try:
-        val = float(re.sub(r"[^\d.]", "", raw))
-        formatted = f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        return f"{formatted} €"
-    except ValueError:
-        return raw or "—"
-
-
 def parse_deadline(raw: str) -> str:
     if not raw:
         return ""
-    raw = raw.strip()
-    m = re.search(r"(\d{2})[/\-\.](\d{2})[/\-\.](\d{4})", raw)
+    m = re.search(r"(\d{2})[/\-\.](\d{2})[/\-\.](\d{4})", raw.strip())
     if m:
         try:
-            return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1))).strftime("%Y-%m-%d")
+            return datetime(
+                int(m.group(3)), int(m.group(2)), int(m.group(1))
+            ).strftime("%Y-%m-%d")
         except ValueError:
             pass
-    # ISO format
     m2 = re.search(r"(\d{4})-(\d{2})-(\d{2})", raw)
     if m2:
         return m2.group(0)
     return ""
 
 
-# ─── Scraping ─────────────────────────────────────────────────────────────────
+def clean_budget(raw: str) -> str:
+    if not raw or raw.strip() in ("", "—", "-"):
+        return "—"
+    raw = raw.strip()
+    # Ελληνική μορφή: 1.234,56
+    if re.search(r"\d\.\d{3},\d{2}", raw):
+        raw = raw.replace(".", "").replace(",", ".")
+    elif "," in raw and "." not in raw:
+        raw = raw.replace(",", ".")
+    try:
+        val = float(re.sub(r"[^\d.]", "", raw))
+        fmt = f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"{fmt} €"
+    except ValueError:
+        return raw or "—"
 
-def detect_active_endpoint(session: requests.Session) -> str | None:
-    """Βρίσκει ποιο endpoint του ΕΣΗΔΗΣ είναι ενεργό."""
-    for url in SEARCH_ENDPOINTS:
+
+# ─── Selenium scraping ────────────────────────────────────────────────────────
+
+def wait_for_table(driver: webdriver.Chrome, timeout: int = PAGE_TIMEOUT):
+    """Αναμένει να φορτώσει ο πίνακας αποτελεσμάτων."""
+    wait = WebDriverWait(driver, timeout)
+    # Δοκιμάζει διάφορους selectors που χρησιμοποιεί το ΕΣΗΔΗΣ
+    selectors = [
+        (By.CSS_SELECTOR, "table.rf-dt"),           # RichFaces datatable
+        (By.CSS_SELECTOR, "table[id*='tenders']"),
+        (By.CSS_SELECTOR, "table[id*='result']"),
+        (By.CSS_SELECTOR, "table[id*='search']"),
+        (By.XPATH, "//table[contains(@class,'rf-dt')]"),
+        (By.XPATH, "//table[.//th[contains(text(),'Α/Α') or contains(text(),'Αριθμ')]]"),
+    ]
+    for by, selector in selectors:
         try:
-            r = session.get(url, timeout=20)
-            if r.status_code == 200 and len(r.text) > 500:
-                log.info(f"Ενεργό endpoint: {url}")
-                return url
-        except requests.RequestException:
+            el = wait.until(EC.presence_of_element_located((by, selector)))
+            return el
+        except TimeoutException:
             continue
     return None
 
 
-def parse_tenders_from_soup(soup: BeautifulSoup, cpv: str) -> list[dict]:
-    """
-    Εξάγει διαγωνισμούς από HTML.
-    Δοκιμάζει πολλαπλές στρατηγικές parsing για ανθεκτικότητα σε layout αλλαγές.
-    """
+def find_cpv_input(driver: webdriver.Chrome):
+    """Βρίσκει το πεδίο εισαγωγής CPV."""
+    selectors = [
+        (By.XPATH, "//input[contains(@id,'cpv') or contains(@name,'cpv')]"),
+        (By.XPATH, "//input[contains(@id,'CPV') or contains(@name,'CPV')]"),
+        (By.XPATH, "//label[contains(text(),'CPV')]/following::input[1]"),
+        (By.XPATH, "//span[contains(text(),'CPV')]/following::input[1]"),
+        (By.CSS_SELECTOR, "input[id*='cpv']"),
+        (By.CSS_SELECTOR, "input[id*='CPV']"),
+    ]
+    for by, sel in selectors:
+        try:
+            el = driver.find_element(by, sel)
+            if el.is_displayed():
+                return el
+        except NoSuchElementException:
+            continue
+    return None
+
+
+def find_search_button(driver: webdriver.Chrome):
+    """Βρίσκει το κουμπί αναζήτησης."""
+    selectors = [
+        (By.XPATH, "//input[@type='submit']"),
+        (By.XPATH, "//button[@type='submit']"),
+        (By.XPATH, "//input[contains(@value,'Αναζήτ')]"),
+        (By.XPATH, "//button[contains(text(),'Αναζήτ')]"),
+        (By.XPATH, "//a[contains(text(),'Αναζήτ')]"),
+        (By.CSS_SELECTOR, "input[id*='search'], button[id*='search']"),
+    ]
+    for by, sel in selectors:
+        try:
+            el = driver.find_element(by, sel)
+            if el.is_displayed():
+                return el
+        except NoSuchElementException:
+            continue
+    return None
+
+
+def extract_rows(driver: webdriver.Chrome, cpv: str) -> list[dict]:
+    """Εξάγει τις γραμμές αποτελεσμάτων από τον πίνακα."""
     results = []
 
-    # Στρατηγική 1: πίνακας με συγκεκριμένο id/class
-    table = (
-        soup.find("table", id=re.compile(r"tender|search|result", re.I))
-        or soup.find("table", class_=re.compile(r"tender|search|result|list", re.I))
-    )
+    # Βρες όλους τους πίνακες και επέλεξε τον σωστό
+    tables = driver.find_elements(By.TAG_NAME, "table")
+    target_table = None
 
-    # Στρατηγική 2: ο μεγαλύτερος πίνακας με > 3 στήλες
-    if not table:
-        tables = soup.find_all("table")
-        for t in tables:
-            headers = t.find_all("th")
-            if len(headers) >= 3:
-                table = t
+    for table in tables:
+        try:
+            headers = table.find_elements(By.TAG_NAME, "th")
+            header_texts = [h.text.strip().lower() for h in headers]
+            header_combined = " ".join(header_texts)
+            # Ψάχνει για headers που σχετίζονται με διαγωνισμούς
+            if any(kw in header_combined for kw in
+                   ["α/α", "αριθμ", "αναθέτ", "καταληκτ", "προϋπ", "τίτλ"]):
+                target_table = table
                 break
+        except StaleElementReferenceException:
+            continue
 
-    if not table:
+    if not target_table:
         return results
 
-    rows = table.find_all("tr")
-    header_row = rows[0] if rows else None
-
-    # Ανίχνευση θέσης στηλών από headers
+    # Ανίχνευση θέσης στηλών
     col_map = {"id": 0, "title": 1, "auth": 2, "deadline": 3, "budget": 4}
-    if header_row:
-        headers_text = [th.get_text(strip=True).lower() for th in header_row.find_all(["th", "td"])]
-        for i, h in enumerate(headers_text):
-            if re.search(r"α/α|αριθμ|κωδ|esidis|id", h):
+    try:
+        headers = target_table.find_elements(By.TAG_NAME, "th")
+        for i, h in enumerate(headers):
+            txt = h.text.strip().lower()
+            if re.search(r"α/α|αριθμ|κωδ|esidis", txt):
                 col_map["id"] = i
-            elif re.search(r"τίτλ|αντικείμ|περιγρ", h):
+            elif re.search(r"τίτλ|αντικείμ|περιγρ|θέμα", txt):
                 col_map["title"] = i
-            elif re.search(r"αναθέτ|φορέ|αρχή", h):
+            elif re.search(r"αναθέτ|φορέ|αρχή", txt):
                 col_map["auth"] = i
-            elif re.search(r"καταληκτ|λήξ|ημερομ", h):
+            elif re.search(r"καταληκτ|λήξ|ημερομ|deadline", txt):
                 col_map["deadline"] = i
-            elif re.search(r"προϋπ|αξία|budget|τιμή", h):
+            elif re.search(r"προϋπ|αξία|budget|τιμή|ποσό", txt):
                 col_map["budget"] = i
+    except Exception:
+        pass
 
-    for row in rows[1:]:
-        cells = row.find_all("td")
-        if len(cells) < 3:
-            continue
+    # Εξαγωγή δεδομένων από γραμμές
+    try:
+        rows = target_table.find_elements(By.XPATH, ".//tbody/tr")
+    except Exception:
+        rows = target_table.find_elements(By.TAG_NAME, "tr")[1:]
 
-        def cell_text(idx):
-            return cells[idx].get_text(strip=True) if idx < len(cells) else ""
+    for row in rows:
+        try:
+            cells = row.find_elements(By.TAG_NAME, "td")
+            if len(cells) < 3:
+                continue
 
-        esidis_id = cell_text(col_map["id"])
-        if not re.search(r"\d{4,8}", esidis_id):
-            continue
+            def cell(idx):
+                return cells[idx].text.strip() if idx < len(cells) else ""
 
-        # Εξαγωγή μόνο του αριθμού αν υπάρχει άλλο κείμενο
-        id_match = re.search(r"\d{4,8}", esidis_id)
-        if id_match:
+            raw_id = cell(col_map["id"])
+            id_match = re.search(r"\d{4,8}", raw_id)
+            if not id_match:
+                continue
             esidis_id = id_match.group(0)
 
-        # URL
-        link = row.find("a", href=True)
-        url = ""
-        if link:
-            href = link["href"]
-            url = href if href.startswith("http") else f"https://www.eprocurement.gov.gr{href}"
+            # URL από link
+            url = ""
+            try:
+                link = cells[col_map["id"]].find_element(By.TAG_NAME, "a")
+                href = link.get_attribute("href") or ""
+                url = href if href.startswith("http") else (
+                    f"https://www.eprocurement.gov.gr{href}" if href else ""
+                )
+            except NoSuchElementException:
+                try:
+                    link = cells[col_map["title"]].find_element(By.TAG_NAME, "a")
+                    href = link.get_attribute("href") or ""
+                    url = href if href.startswith("http") else (
+                        f"https://www.eprocurement.gov.gr{href}" if href else ""
+                    )
+                except NoSuchElementException:
+                    pass
 
-        tender = {
-            "esidis_id":             esidis_id,
-            "title":                 cell_text(col_map["title"]),
-            "url":                   url,
-            "contracting_authority": cell_text(col_map["auth"]),
-            "deadline":              parse_deadline(cell_text(col_map["deadline"])),
-            "deadline_raw":          cell_text(col_map["deadline"]),
-            "budget":                clean_budget(cell_text(col_map["budget"])),
-            "cpv_matched":           cpv,
-            "scraped_at":            datetime.now().isoformat(),
-        }
-        results.append(tender)
+            results.append({
+                "esidis_id":             esidis_id,
+                "title":                 cell(col_map["title"]),
+                "url":                   url,
+                "contracting_authority": cell(col_map["auth"]),
+                "deadline":              parse_deadline(cell(col_map["deadline"])),
+                "deadline_raw":          cell(col_map["deadline"]),
+                "budget":                clean_budget(cell(col_map["budget"])),
+                "cpv_matched":           cpv,
+                "scraped_at":            datetime.now().isoformat(),
+            })
+        except StaleElementReferenceException:
+            continue
+        except Exception as e:
+            log.debug(f"  Row parse error: {e}")
+            continue
 
     return results
 
 
-def scrape_cpv(session: requests.Session, endpoint: str, cpv: str) -> list[dict]:
+def has_next_page(driver: webdriver.Chrome) -> bool:
+    """Ελέγχει αν υπάρχει επόμενη σελίδα."""
+    try:
+        next_links = driver.find_elements(
+            By.XPATH,
+            "//a[contains(@class,'rf-ds-btn-next') or "
+            "contains(text(),'Επόμενη') or contains(text(),'›') or "
+            "contains(@title,'Next') or contains(@title,'Επόμενη')]"
+        )
+        for link in next_links:
+            if link.is_displayed() and link.is_enabled():
+                parent_class = link.get_attribute("class") or ""
+                # Αν το κουμπί είναι disabled δεν υπάρχει επόμενη
+                if "dis" not in parent_class.lower():
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def click_next_page(driver: webdriver.Chrome) -> bool:
+    """Κλικ στην επόμενη σελίδα."""
+    try:
+        next_link = driver.find_element(
+            By.XPATH,
+            "//a[contains(@class,'rf-ds-btn-next') and "
+            "not(contains(@class,'dis'))]"
+        )
+        driver.execute_script("arguments[0].click();", next_link)
+        time.sleep(2)
+        return True
+    except Exception:
+        return False
+
+
+def scrape_cpv(driver: webdriver.Chrome, cpv: str) -> list[dict]:
+    """Scrape όλες τις σελίδες για ένα CPV."""
     results = []
     log.info(f"  CPV {cpv}...")
 
-    for page in range(1, MAX_PAGES + 1):
-        params = {
-            "cpvCode":    cpv,
-            "pageIndex":  page,
-            "pageSize":   20,
-            "tenderStatus": "ACTIVE",
-            "lang":       "el",
-        }
-        try:
-            resp = session.get(endpoint, params=params, timeout=30)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            log.warning(f"    Σφάλμα page {page}: {e}")
-            break
+    try:
+        # Φόρτωση σελίδας αναζήτησης
+        driver.get(SEARCH_URL)
+        wait = WebDriverWait(driver, PAGE_TIMEOUT)
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        page_results = parse_tenders_from_soup(soup, cpv)
+        # Αναμονή για φόρτωση φόρμας
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "form")))
+        time.sleep(2)
 
-        if not page_results:
-            log.debug(f"    page {page}: 0 αποτελέσματα, τέλος")
-            break
+        # Εύρεση πεδίου CPV
+        cpv_input = find_cpv_input(driver)
+        if not cpv_input:
+            log.warning(f"    Δεν βρέθηκε πεδίο CPV για {cpv}")
+            # Debug: αποθήκευση HTML για ανάλυση
+            with open(f"debug_{cpv.replace('-','')}.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source[:5000])
+            return results
 
-        results.extend(page_results)
-        log.info(f"    page {page}: {len(page_results)} διαγωνισμοί")
+        # Εισαγωγή CPV
+        cpv_input.clear()
+        cpv_input.send_keys(cpv)
+        time.sleep(0.5)
 
-        # Έλεγχος επόμενης σελίδας
-        has_next = soup.find("a", string=re.compile(r"επόμεν|next|›|»|\d", re.I))
-        if not has_next:
-            break
+        # Εύρεση και κλικ κουμπιού αναζήτησης
+        btn = find_search_button(driver)
+        if btn:
+            driver.execute_script("arguments[0].click();", btn)
+        else:
+            cpv_input.send_keys(Keys.RETURN)
 
-        time.sleep(REQUEST_DELAY)
+        # Αναμονή για αποτελέσματα
+        time.sleep(3)
+
+        # Scrape σελίδες
+        page = 1
+        max_pages = 10
+        while page <= max_pages:
+            rows = extract_rows(driver, cpv)
+            if not rows:
+                if page == 1:
+                    log.info(f"    0 αποτελέσματα")
+                break
+
+            results.extend(rows)
+            log.info(f"    σελίδα {page}: {len(rows)} διαγωνισμοί")
+
+            if not has_next_page(driver):
+                break
+
+            if not click_next_page(driver):
+                break
+
+            page += 1
+            time.sleep(2)
+
+    except TimeoutException:
+        log.warning(f"    Timeout για CPV {cpv}")
+    except Exception as e:
+        log.error(f"    Σφάλμα CPV {cpv}: {e}")
 
     return results
 
@@ -269,31 +419,28 @@ def scrape_cpv(session: requests.Session, endpoint: str, cpv: str) -> list[dict]
 def run():
     log.info("=" * 60)
     log.info(f"Έναρξη — {datetime.now().strftime('%d/%m/%Y %H:%M UTC')}")
-
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    endpoint = detect_active_endpoint(session)
-    if not endpoint:
-        log.error("Κανένα endpoint ΕΣΗΔΗΣ δεν απάντησε. Τερματισμός.")
-        sys.exit(1)
+    log.info(f"CPV: {len(CPV_CODES)}")
 
     existing = load_existing()
     new_count = 0
 
-    for cpv in CPV_CODES:
-        tenders = scrape_cpv(session, endpoint, cpv)
-        for t in tenders:
-            if t["esidis_id"] not in existing:
-                existing[t["esidis_id"]] = t
-                new_count += 1
-            else:
-                existing[t["esidis_id"]].update({
-                    "deadline":   t["deadline"],
-                    "budget":     t["budget"],
-                    "scraped_at": t["scraped_at"],
-                })
-        time.sleep(REQUEST_DELAY)
+    driver = make_driver()
+    try:
+        for cpv in CPV_CODES:
+            tenders = scrape_cpv(driver, cpv)
+            for t in tenders:
+                if t["esidis_id"] not in existing:
+                    existing[t["esidis_id"]] = t
+                    new_count += 1
+                else:
+                    existing[t["esidis_id"]].update({
+                        "deadline":   t["deadline"],
+                        "budget":     t["budget"],
+                        "scraped_at": t["scraped_at"],
+                    })
+            time.sleep(BETWEEN_CPV)
+    finally:
+        driver.quit()
 
     save_results(existing)
     log.info(f"Νέοι: {new_count} | Σύνολο: {len(existing)}")
