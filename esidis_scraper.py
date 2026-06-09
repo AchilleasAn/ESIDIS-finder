@@ -1,15 +1,21 @@
 """
-ΕΣΗΔΗΣ/ΚΗΜΔΗΣ API Scraper
-Χρησιμοποιεί το δημόσιο API του ΚΗΜΔΗΣ για να ανακτά διαγωνισμούς άμεσα (JSON).
-Με δυναμική/ασφαλή εξαγωγή πεδίων.
+ΕΣΗΔΗΣ Portal Scraper (NEPPS-SEARCH)
+Αναζητά με Selenium στη σελίδα των Ηλεκτρονικών Διαγωνισμών (ΕΣΗΔΗΣ)
+ώστε να λαμβάνει τον πραγματικό Α/Α, Ημερομηνία Λήξης και Προϋπολογισμό.
 """
 
 import json
 import logging
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
-import requests
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 # ─── CPV Codes ────────────────────────────────────────────────────────────────
 
@@ -24,26 +30,19 @@ CPV_CODES = [
     "79341400-0", "79342200-5", "79342321-9", "79993100-2", "80533100-0",
 ]
 
-API_BASE = "https://cerpp.eprocurement.gov.gr"
-SEARCH_ENDPOINT = f"{API_BASE}/khmdhs-opendata/notice"
-
+# Το σωστό URL από το screenshot σου
+SEARCH_URL = "https://nepps-search.eprocurement.gov.gr/actSearch/faces/active_search_main.jspx"
 RESULTS_FILE = Path("results.json")
-LOG_FILE     = Path("scraper.log")
+LOG_FILE = Path("scraper.log")
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
+# ─── Logging & Helpers ────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler(sys.stdout)]
 )
 log = logging.getLogger(__name__)
-
-# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def load_existing() -> dict:
     if RESULTS_FILE.exists():
@@ -56,7 +55,6 @@ def load_existing() -> dict:
     return {}
 
 def save_results(tenders: dict) -> None:
-    # Διατηρούμε αυτούς που δεν έχουν λήξει πάνω από 30 μέρες
     cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     active = {
         k: v for k, v in tenders.items()
@@ -65,154 +63,169 @@ def save_results(tenders: dict) -> None:
     payload = {
         "last_updated": datetime.now().isoformat(),
         "total": len(active),
-        "tenders": sorted(
-            active.values(),
-            key=lambda x: x.get("deadline") or "9999-12-31"
-        ),
+        "tenders": sorted(active.values(), key=lambda x: x.get("deadline") or "9999-12-31")
     }
     with open(RESULTS_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     log.info(f"Αποθηκεύτηκαν {len(active)} διαγωνισμοί → {RESULTS_FILE}")
 
+def make_driver():
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--lang=el-GR")
+    return webdriver.Chrome(options=opts)
+
+# ─── DOM Scrapers ─────────────────────────────────────────────────────────────
+
+def find_cpv_input(driver):
+    selectors = [
+        "//tr[.//label[contains(text(), 'Κωδικός CPV')]]//input[@type='text']",
+        "//label[contains(text(), 'Κωδικός CPV')]/following::input[@type='text'][1]",
+        "//input[contains(@title, 'CPV')]"
+    ]
+    for sel in selectors:
+        try:
+            el = driver.find_element(By.XPATH, sel)
+            if el.is_displayed(): return el
+        except: continue
+    return None
+
+def find_search_button(driver):
+    selectors = [
+        "//a[contains(text(), 'Αναζήτηση') and not(contains(text(), 'Κριτήρια'))]",
+        "//button[contains(text(), 'Αναζήτηση')]",
+        "//input[@value='Αναζήτηση']"
+    ]
+    for sel in selectors:
+        try:
+            el = driver.find_element(By.XPATH, sel)
+            if el.is_displayed(): return el
+        except: continue
+    return None
+
+def extract_rows(driver, cpv):
+    results = []
+    try:
+        tables = driver.find_elements(By.XPATH, "//table[.//th[contains(., 'Α/Α Διαγωνιστικής')]]")
+        if not tables: return results
+        
+        rows = tables[0].find_elements(By.XPATH, ".//tbody/tr")
+        for row in rows:
+            cells = row.find_elements(By.TAG_NAME, "td")
+            if len(cells) < 10: continue
+            
+            # Ανάγνωση στηλών βάσει του πίνακα του ΕΣΗΔΗΣ
+            esidis_id = cells[0].text.strip()
+            title = cells[2].text.strip()
+            budget = cells[3].text.strip()
+            deadline = cells[6].text.strip()
+            matched_cpv = cells[7].text.strip()
+            auth = cells[9].text.strip()
+            
+            if not esidis_id or esidis_id == "—": continue
+            
+            # Μετατροπή ημερομηνίας σε μορφή YYYY-MM-DD για σωστή ταξινόμηση
+            clean_deadline = ""
+            if deadline and deadline != "—":
+                try:
+                    parts = deadline.split(" ")[0].split("-")
+                    if len(parts) == 3:
+                        clean_deadline = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                except:
+                    clean_deadline = deadline
+            
+            # Εύρεση URL
+            try:
+                link = cells[0].find_element(By.TAG_NAME, "a")
+                url = link.get_attribute("href")
+            except:
+                url = f"https://nepps-search.eprocurement.gov.gr/actSearch/resources/search/{esidis_id}"
+                
+            results.append({
+                "esidis_id": esidis_id,
+                "title": title,
+                "url": url,
+                "contracting_authority": auth,
+                "deadline": clean_deadline,
+                "deadline_raw": deadline,
+                "budget": f"{budget} €" if budget else "—",
+                "cpv_matched": matched_cpv if matched_cpv else cpv,
+                "scraped_at": datetime.now().isoformat()
+            })
+    except Exception as e:
+        log.error(f"Σφάλμα εξαγωγής πίνακα: {e}")
+        
+    return results
+
 # ─── Main Logic ───────────────────────────────────────────────────────────────
 
 def run():
     log.info("=" * 60)
-    log.info(f"Έναρξη API Scraper — {datetime.now().strftime('%d/%m/%Y %H:%M UTC')}")
-    
     existing = load_existing()
     new_count = 0
-    updated_count = 0
+    driver = make_driver()
     
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
-    
-    date_from = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
-    
-    payload = {
-        "cpvItems": CPV_CODES,
-        "dateFrom": date_from
-    }
-    
-    page = 0
-    while True:
-        log.info(f"Χτύπημα API (σελίδα {page})...")
-        try:
-            res = requests.post(f"{SEARCH_ENDPOINT}?page={page}", json=payload, headers=headers, timeout=30)
-            res.raise_for_status()
+    try:
+        for cpv in CPV_CODES:
+            log.info(f"Αναζήτηση στο ΕΣΗΔΗΣ για CPV: {cpv}")
+            driver.get(SEARCH_URL)
+            time.sleep(3) # Αναμονή να φορτώσει το JSF
             
-            data = res.json()
-            content = data.get("content", [])
+            cpv_input = find_cpv_input(driver)
+            if not cpv_input:
+                log.error(f"Δεν βρέθηκε το πεδίο CPV για το {cpv}")
+                continue
+                
+            cpv_input.clear()
+            cpv_input.send_keys(cpv)
+            time.sleep(1)
             
-            if not content:
-                log.info("Δεν υπάρχουν άλλα αποτελέσματα.")
-                break
+            search_btn = find_search_button(driver)
+            if search_btn:
+                driver.execute_script("arguments[0].click();", search_btn)
+            else:
+                log.error("Δεν βρέθηκε το κουμπί Αναζήτηση!")
+                continue
                 
-            log.info(f"  Βρέθηκαν {len(content)} εγγραφές στη σελίδα {page}.")
+            time.sleep(5) # Αναμονή για να επιστρέψει ο server τον πίνακα
             
-            for item in content:
-                # 1. ΑΔΑΜ / ID
-                adam = item.get("referenceNumber") or item.get("sysCode") or item.get("noticeCode")
-                if not adam:
-                    continue
+            page = 1
+            max_pages = 5
+            while page <= max_pages:
+                rows = extract_rows(driver, cpv)
+                if not rows: break
                 
-                # 2. Τίτλος
-                title = item.get("title") or "—"
-                
-                # 3. Αναθέτουσα Αρχή (Safe extraction)
-                org_val = item.get("organization") or item.get("organizations") or item.get("buyer") or {}
-                if isinstance(org_val, list) and len(org_val) > 0:
-                    org_val = org_val[0]
-                
-                if isinstance(org_val, dict):
-                    org = org_val.get("value") or org_val.get("label") or org_val.get("name") or "—"
-                elif isinstance(org_val, str):
-                    org = org_val
-                else:
-                    org = "—"
-                
-                # 4. Ημερομηνία Λήξης (Safe extraction)
-                deadline_raw = item.get("finalDateTo") or item.get("finalDateFrom") or item.get("endDate") or item.get("submissionDate") or ""
-                deadline = str(deadline_raw).split(" ")[0] if deadline_raw else ""
-                
-                # 5. Προϋπολογισμός (Safe extraction)
-                budget_num = item.get("amountWithoutVat") or item.get("totalCostFrom") or item.get("totalCostTo")
-                
-                if not budget_num:
-                    budget_obj = item.get("budget") or item.get("totalAmount") or item.get("contractAmount") or {}
-                    if isinstance(budget_obj, dict):
-                        budget_num = budget_obj.get("amountWithoutVat") or budget_obj.get("value") or budget_obj.get("amount")
-                
-                if budget_num:
-                    try:
-                        budget_str = f"{float(budget_num):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
-                    except ValueError:
-                        budget_str = str(budget_num)
-                else:
-                    budget_str = "—"
-                
-                # 6. CPV (Safe extraction)
-                item_cpvs = item.get("cpvItems") or item.get("cpvs") or []
-                matched_cpv = "—"
-                
-                if isinstance(item_cpvs, dict):
-                    item_cpvs = [item_cpvs]
-                elif isinstance(item_cpvs, str):
-                    item_cpvs = [item_cpvs]
-                    
-                for c in item_cpvs:
-                    if isinstance(c, dict):
-                        c_code = str(c.get("key") or c.get("code") or c.get("value") or "")
+                for t in rows:
+                    if t["esidis_id"] not in existing:
+                        existing[t["esidis_id"]] = t
+                        new_count += 1
                     else:
-                        c_code = str(c)
-                        
-                    clean_c = c_code.split('-')[0].strip()
-                    for my_cpv in CPV_CODES:
-                        if clean_c and clean_c in my_cpv:
-                            matched_cpv = c_code
-                            break
-                    if matched_cpv != "—":
+                        existing[t["esidis_id"]].update({
+                            "deadline": t["deadline"], 
+                            "budget": t["budget"], 
+                            "scraped_at": t["scraped_at"]
+                        })
+                
+                # Έλεγχος για επόμενη σελίδα
+                try:
+                    next_link = driver.find_element(By.XPATH, "//a[contains(text(), 'Επόμενη') or contains(text(), '›')]")
+                    if "dis" not in next_link.get_attribute("class").lower():
+                        driver.execute_script("arguments[0].click();", next_link)
+                        time.sleep(4)
+                        page += 1
+                    else:
                         break
-                
-                # 7. Link για το PDF
-                url = f"{API_BASE}/khmdhs-opendata/notice/attachment/{adam}"
-                
-                tender_obj = {
-                    "esidis_id": adam,
-                    "title": title,
-                    "url": url,
-                    "contracting_authority": org,
-                    "deadline": deadline,
-                    "deadline_raw": deadline_raw,
-                    "budget": budget_str,
-                    "cpv_matched": matched_cpv,
-                    "scraped_at": datetime.now().isoformat()
-                }
-                
-                if adam not in existing:
-                    existing[adam] = tender_obj
-                    new_count += 1
-                else:
-                    existing[adam].update({
-                        "deadline": deadline,
-                        "budget": budget_str,
-                        "scraped_at": tender_obj["scraped_at"],
-                    })
-                    updated_count += 1
-            
-            if data.get("last") is True:
-                break
-                
-            page += 1
-            
-        except requests.exceptions.RequestException as e:
-            log.error(f"Αποτυχία κλήσης API: {e}")
-            break
-            
-    log.info(f"Ολοκληρώθηκε. Νέοι: {new_count} | Ενημερώθηκαν: {updated_count} | Σύνολο: {len(existing)}")
+                except:
+                    break
+                    
+    finally:
+        driver.quit()
+        
     save_results(existing)
+    log.info(f"Ολοκληρώθηκε. Νέοι: {new_count} | Σύνολο: {len(existing)}")
     log.info("=" * 60)
 
 if __name__ == "__main__":
