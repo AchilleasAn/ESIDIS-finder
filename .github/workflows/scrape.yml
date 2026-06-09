@@ -2,8 +2,8 @@ name: ΕΣΗΔΗΣ Scraper
 
 on:
   schedule:
-    - cron: '0 5,10,15,20 * * *'
-  workflow_dispatch:
+    - cron: '0 * * * *'  # Τρέχει αυτόματα κάθε 1 ώρα (στο λεπτό 0)
+  workflow_dispatch:      # Επιτρέπει τη χειροκίνητη εκτέλεση μέσω API / Dashboard
 
 permissions:
   contents: write
@@ -33,7 +33,7 @@ jobs:
           git config user.name "KHMDS Bot"
           git config user.email "bot@khmds-monitor"
           git add results.json scraper.log
-          git diff --staged --quiet || git commit -m "Update API results"
+          git diff --staged --quiet || git commit -m "Update API results (On-Demand)"
           git push
           
       - name: Deploy to GitHub Pages
