@@ -13,45 +13,32 @@ permissions:
 jobs:
   scrape-and-deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+        
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install Chrome
-        run: |
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-          sudo apt-get update -q
-          sudo apt-get install -y google-chrome-stable
-
-      - name: Install ChromeDriver
-        run: |
-          pip install webdriver-manager
-          python -c "from webdriver_manager.chrome import ChromeDriverManager; ChromeDriverManager().install()"
-
-      - name: Install Python dependencies
-        run: pip install selenium webdriver-manager requests beautifulsoup4
-
+          
+      - name: Install dependencies
+        run: pip install requests
+        
       - name: Run scraper
         run: python esidis_scraper.py
-
-      - name: Commit results
+        
+      - name: Commit results.json
         run: |
-          git config user.name "ΕΣΗΔΗΣ Bot"
-          git config user.email "bot@esidis-monitor"
+          git config user.name "KHMDS Bot"
+          git config user.email "bot@khmds-monitor"
           git add results.json scraper.log
-          git diff --staged --quiet || git commit -m "Update $(date +'%d/%m/%Y %H:%M')"
+          git diff --staged --quiet || git commit -m "Update API results"
           git push
-
+          
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .
-          exclude_assets: '.github,esidis_scraper.py,README.md,scraper.log'
+          exclude_assets: '.github,esidis_scraper.py,scraper.log'
