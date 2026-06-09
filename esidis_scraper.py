@@ -1,6 +1,7 @@
 """
 ΕΣΗΔΗΣ/ΚΗΜΔΗΣ API Scraper
 Χρησιμοποιεί το δημόσιο API του ΚΗΜΔΗΣ για να ανακτά διαγωνισμούς άμεσα (JSON).
+Με δυναμική/ασφαλή εξαγωγή πεδίων.
 """
 
 import json
@@ -55,7 +56,7 @@ def load_existing() -> dict:
     return {}
 
 def save_results(tenders: dict) -> None:
-    # Διατηρούμε μόνο αυτούς που δεν έχουν λήξει πάνω από 30 μέρες
+    # Διατηρούμε αυτούς που δεν έχουν λήξει πάνω από 30 μέρες
     cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     active = {
         k: v for k, v in tenders.items()
@@ -88,7 +89,6 @@ def run():
         "Accept": "application/json"
     }
     
-    # Ζητάμε δεδομένα των τελευταίων 90 ημερών
     date_from = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
     
     payload = {
@@ -113,23 +113,38 @@ def run():
             log.info(f"  Βρέθηκαν {len(content)} εγγραφές στη σελίδα {page}.")
             
             for item in content:
-                # Χρησιμοποιούμε τον ΑΔΑΜ ως ID
-                adam = item.get("referenceNumber") or item.get("sysCode")
+                # 1. ΑΔΑΜ / ID
+                adam = item.get("referenceNumber") or item.get("sysCode") or item.get("noticeCode")
                 if not adam:
                     continue
                 
+                # 2. Τίτλος
                 title = item.get("title") or "—"
                 
-                # Αναθέτουσα Αρχή (από το πεδίο value του αντικειμένου organization)
-                org_data = item.get("organization") or {}
-                org = org_data.get("value", "—")
+                # 3. Αναθέτουσα Αρχή (Safe extraction)
+                org_val = item.get("organization") or item.get("organizations") or item.get("buyer") or {}
+                if isinstance(org_val, list) and len(org_val) > 0:
+                    org_val = org_val[0]
                 
-                # Ημερομηνία Λήξης
-                deadline_raw = item.get("finalDateTo") or item.get("finalDateFrom") or ""
-                deadline = deadline_raw.split(" ")[0] if deadline_raw else ""
+                if isinstance(org_val, dict):
+                    org = org_val.get("value") or org_val.get("label") or org_val.get("name") or "—"
+                elif isinstance(org_val, str):
+                    org = org_val
+                else:
+                    org = "—"
                 
-                # Προϋπολογισμός (από το πεδίο amountWithoutVat)
-                budget_num = item.get("amountWithoutVat") or 0
+                # 4. Ημερομηνία Λήξης (Safe extraction)
+                deadline_raw = item.get("finalDateTo") or item.get("finalDateFrom") or item.get("endDate") or item.get("submissionDate") or ""
+                deadline = str(deadline_raw).split(" ")[0] if deadline_raw else ""
+                
+                # 5. Προϋπολογισμός (Safe extraction)
+                budget_num = item.get("amountWithoutVat") or item.get("totalCostFrom") or item.get("totalCostTo")
+                
+                if not budget_num:
+                    budget_obj = item.get("budget") or item.get("totalAmount") or item.get("contractAmount") or {}
+                    if isinstance(budget_obj, dict):
+                        budget_num = budget_obj.get("amountWithoutVat") or budget_obj.get("value") or budget_obj.get("amount")
+                
                 if budget_num:
                     try:
                         budget_str = f"{float(budget_num):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -138,16 +153,30 @@ def run():
                 else:
                     budget_str = "—"
                 
-                # CPV Code (από το πεδίο key της λίστας cpvs)
-                item_cpvs = item.get("cpvs") or []
+                # 6. CPV (Safe extraction)
+                item_cpvs = item.get("cpvItems") or item.get("cpvs") or []
                 matched_cpv = "—"
+                
+                if isinstance(item_cpvs, dict):
+                    item_cpvs = [item_cpvs]
+                elif isinstance(item_cpvs, str):
+                    item_cpvs = [item_cpvs]
+                    
                 for c in item_cpvs:
-                    c_code = c.get("key")
-                    if c_code in CPV_CODES:
-                        matched_cpv = c_code
+                    if isinstance(c, dict):
+                        c_code = str(c.get("key") or c.get("code") or c.get("value") or "")
+                    else:
+                        c_code = str(c)
+                        
+                    clean_c = c_code.split('-')[0].strip()
+                    for my_cpv in CPV_CODES:
+                        if clean_c and clean_c in my_cpv:
+                            matched_cpv = c_code
+                            break
+                    if matched_cpv != "—":
                         break
                 
-                # Link για το PDF του διαγωνισμού
+                # 7. Link για το PDF
                 url = f"{API_BASE}/khmdhs-opendata/notice/attachment/{adam}"
                 
                 tender_obj = {
@@ -173,7 +202,6 @@ def run():
                     })
                     updated_count += 1
             
-            # Έλεγχος αν φτάσαμε στην τελευταία σελίδα
             if data.get("last") is True:
                 break
                 
