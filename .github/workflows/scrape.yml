@@ -2,8 +2,8 @@ name: ΕΣΗΔΗΣ Scraper
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Τρέχει αυτόματα κάθε 1 ώρα (στο λεπτό 0)
-  workflow_dispatch:      # Επιτρέπει τη χειροκίνητη εκτέλεση μέσω API / Dashboard
+    - cron: '0 * * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,17 +23,17 @@ jobs:
           python-version: '3.11'
           
       - name: Install dependencies
-        run: pip install requests
+        run: pip install selenium
         
       - name: Run scraper
         run: python esidis_scraper.py
         
       - name: Commit results.json
         run: |
-          git config user.name "KHMDS Bot"
-          git config user.email "bot@khmds-monitor"
+          git config user.name "ESIDIS Bot"
+          git config user.email "bot@esidis-monitor"
           git add results.json scraper.log
-          git diff --staged --quiet || git commit -m "Update API results (On-Demand)"
+          git diff --staged --quiet || git commit -m "Update ESIDIS results"
           git push
           
       - name: Deploy to GitHub Pages
