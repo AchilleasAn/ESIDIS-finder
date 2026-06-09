@@ -1,8 +1,5 @@
 """
-ΕΣΗΔΗΣ Portal Scraper (NEPPS-SEARCH)
-Αναζητά με Selenium στη σελίδα των Ηλεκτρονικών Διαγωνισμών (ΕΣΗΔΗΣ)
-Λαμβάνει τον πραγματικό Α/Α, Ημερομηνία Λήξης και Προϋπολογισμό.
-Αφαιρεί αυτόματα τα παλιά δεδομένα του ΚΗΜΔΗΣ.
+ΕΣΗΔΗΣ Portal Scraper (NEPPS-SEARCH) - SAFE MODE
 """
 
 import json
@@ -14,9 +11,9 @@ from pathlib import Path
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
-
-# ─── CPV Codes ────────────────────────────────────────────────────────────────
 
 CPV_CODES = [
     "31681500-8", "31158000-8", "34144900-7", "48422000-2", "32440000-9",
@@ -45,8 +42,6 @@ def load_existing() -> dict:
                 valid = {}
                 for r in data.get("tenders", []):
                     eid = str(r.get("esidis_id", ""))
-                    # Η ΜΑΓΕΙΑ ΕΔΩ: Κρατάμε ΑΥΣΤΗΡΑ μόνο νούμερα (Α/Α ΕΣΗΔΗΣ). 
-                    # Διαγράφει αυτόματα τα 26PROC... του ΚΗΜΔΗΣ!
                     if eid.isdigit():
                         valid[eid] = r
                 return valid
@@ -64,47 +59,27 @@ def save_results(tenders: dict) -> None:
     }
     with open(RESULTS_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    log.info(f"Αποθηκεύτηκαν {len(active)} διαγωνισμοί (μόνο καθαρό ΕΣΗΔΗΣ) → {RESULTS_FILE}")
+    log.info(f"Αποθηκεύτηκαν {len(active)} διαγωνισμοί → {RESULTS_FILE}")
 
 def make_driver():
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--lang=el-GR")
-    return webdriver.Chrome(options=opts)
-
-def find_cpv_input(driver):
-    try:
-        inputs = driver.find_elements(By.XPATH, "//tr[.//label[contains(text(), 'Κωδικός CPV')]]//input[@type='text']")
-        for inp in inputs:
-            if inp.is_displayed():
-                return inp
-    except:
-        pass
-    return None
-
-def find_search_button(driver):
-    try:
-        buttons = driver.find_elements(By.XPATH, "//*[text()='Αναζήτηση']")
-        for btn in buttons:
-            if btn.is_displayed() and "title" not in btn.get_attribute("class").lower():
-                return btn
-    except:
-        pass
-    return None
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=opts)
 
 def extract_rows(driver, cpv):
     results = []
     try:
-        # Αντί να ψάχνουμε πολύπλοκους πίνακες, σαρώνουμε απευθείας όλα τα TR της σελίδας
         rows = driver.find_elements(By.TAG_NAME, "tr")
         for row in rows:
             cells = row.find_elements(By.TAG_NAME, "td")
-            if len(cells) >= 11:  # Το ΕΣΗΔΗΣ έχει πολλές στήλες
+            if len(cells) >= 11:
                 esidis_id = cells[0].text.strip()
-                # Αν το πρώτο κελί είναι καθαρό νούμερο (π.χ. 356675), τότε ΕΙΝΑΙ ο διαγωνισμός μας!
                 if not esidis_id.isdigit():
                     continue
                 
@@ -114,7 +89,6 @@ def extract_rows(driver, cpv):
                 matched_cpv = cells[7].text.strip()
                 auth = cells[9].text.strip()
                 
-                # Μετατροπή ημερομηνίας "12-06-2026 15:00:00" -> "2026-06-12"
                 clean_deadline = ""
                 if deadline_raw and deadline_raw != "—":
                     try:
@@ -153,74 +127,69 @@ def run():
     new_count = 0
     
     driver = make_driver()
+    # Ορίζουμε μέγιστο χρόνο αναμονής για να μην κρασάρει το script αν κολλήσει το ΕΣΗΔΗΣ
+    driver.set_page_load_timeout(45) 
+    
     try:
         for cpv in CPV_CODES:
-            log.info(f"Αναζήτηση στο ΕΣΗΔΗΣ για CPV: {cpv}")
-            driver.get(SEARCH_URL)
-            time.sleep(4)  # Περιμένουμε να φορτώσει το βαρύ σύστημα
-            
-            cpv_input = find_cpv_input(driver)
-            if not cpv_input:
-                continue
+            try: # <--- ΤΟ ΔΙΧΤΥ ΑΣΦΑΛΕΙΑΣ: Αν κάτι πάει στραβά σε αυτό το CPV, δεν κρασάρει το πρόγραμμα.
+                log.info(f"Αναζήτηση στο ΕΣΗΔΗΣ για CPV: {cpv}")
+                driver.get(SEARCH_URL)
+                time.sleep(3)
                 
-            cpv_input.clear()
-            time.sleep(0.5)
-            cpv_input.send_keys(cpv)
-            time.sleep(1)
-            
-            search_btn = find_search_button(driver)
-            if search_btn:
-                driver.execute_script("arguments[0].scrollIntoView(true);", search_btn)
-                time.sleep(1)
-                driver.execute_script("arguments[0].click();", search_btn)
-            else:
-                continue
-                
-            log.info("  Αναμονή 8 δευτερόλεπτα για φόρτωση πίνακα...")
-            time.sleep(8)
-            
-            page = 1
-            max_pages = 5
-            while page <= max_pages:
-                rows = extract_rows(driver, cpv)
-                if not rows:
-                    break
+                inputs = driver.find_elements(By.XPATH, "//tr[.//label[contains(text(), 'Κωδικός CPV')]]//input[@type='text']")
+                cpv_input = next((inp for inp in inputs if inp.is_displayed()), None)
+                if not cpv_input:
+                    continue
                     
-                log.info(f"  Σελίδα {page}: Βρέθηκαν {len(rows)} διαγωνισμοί.")
-                for t in rows:
-                    if t["esidis_id"] not in existing:
-                        existing[t["esidis_id"]] = t
-                        new_count += 1
-                    else:
-                        existing[t["esidis_id"]].update({
-                            "deadline": t["deadline"], 
-                            "budget": t["budget"], 
-                            "scraped_at": t["scraped_at"]
-                        })
+                cpv_input.clear()
+                cpv_input.send_keys(cpv)
                 
-                # Check for next page
-                try:
+                buttons = driver.find_elements(By.XPATH, "//*[text()='Αναζήτηση']")
+                search_btn = next((btn for btn in buttons if btn.is_displayed() and "title" not in btn.get_attribute("class").lower()), None)
+                
+                if search_btn:
+                    driver.execute_script("arguments[0].click();", search_btn)
+                else:
+                    continue
+                    
+                time.sleep(6) # Αναμονή πίνακα
+                
+                page = 1
+                while page <= 3: # Περιορίζουμε στις πρώτες 3 σελίδες ανά CPV για ταχύτητα
+                    rows = extract_rows(driver, cpv)
+                    if not rows:
+                        break
+                        
+                    for t in rows:
+                        if t["esidis_id"] not in existing:
+                            existing[t["esidis_id"]] = t
+                            new_count += 1
+                        else:
+                            existing[t["esidis_id"]].update({"deadline": t["deadline"], "budget": t["budget"], "scraped_at": t["scraped_at"]})
+                    
                     next_links = driver.find_elements(By.XPATH, "//a[contains(text(), 'Επόμενη') or contains(text(), '›')]")
                     clicked = False
                     for link in next_links:
                         if link.is_displayed() and "dis" not in link.get_attribute("class").lower():
-                            driver.execute_script("arguments[0].scrollIntoView(true);", link)
-                            time.sleep(1)
                             driver.execute_script("arguments[0].click();", link)
                             clicked = True
-                            time.sleep(6)
+                            time.sleep(4)
                             break
                     if clicked:
                         page += 1
                     else:
                         break
-                except:
-                    break
+                        
+            except Exception as e:
+                log.warning(f"Το CPV {cpv} προσπεράστηκε λόγω σφάλματος/καθυστέρησης του ΕΣΗΔΗΣ.")
+                continue # Προχωράει ομαλά στο επόμενο CPV!
+                
     finally:
         driver.quit()
         
     save_results(existing)
-    log.info(f"Ολοκληρώθηκε. Νέοι ΕΣΗΔΗΣ: {new_count} | Σύνολο ΕΣΗΔΗΣ: {len(existing)}")
+    log.info(f"Ολοκληρώθηκε με ασφάλεια. Νέοι ΕΣΗΔΗΣ: {new_count} | Σύνολο ΕΣΗΔΗΣ: {len(existing)}")
     log.info("=" * 60)
 
 if __name__ == "__main__":
