@@ -1,4 +1,4 @@
-name: ΕΣΗΔΗΣ Scraper
+name: KHMDS API Scraper
 
 on:
   schedule:
@@ -23,19 +23,17 @@ jobs:
           python-version: '3.11'
           
       - name: Install dependencies
-        run: |
-          pip install playwright
-          playwright install chromium
-          
+        run: pip install requests
+        
       - name: Run scraper
         run: python esidis_scraper.py
         
       - name: Commit results.json
         run: |
-          git config user.name "ESIDIS Bot"
-          git config user.email "bot@esidis-monitor"
+          git config user.name "KHMDS Bot"
+          git config user.email "bot@khmds-monitor"
           git add results.json scraper.log
-          git diff --staged --quiet || git commit -m "Update ESIDIS results"
+          git diff --staged --quiet || git commit -m "Update KHMDS API results"
           git push
           
       - name: Deploy to GitHub Pages
