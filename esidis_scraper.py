@@ -1,7 +1,6 @@
 """
 ΕΣΗΔΗΣ/ΚΗΜΔΗΣ API Scraper
 Χρησιμοποιεί το δημόσιο API του ΚΗΜΔΗΣ για να ανακτά διαγωνισμούς άμεσα (JSON).
-Αντικαθιστά πλήρως το Selenium.
 """
 
 import json
@@ -89,7 +88,7 @@ def run():
         "Accept": "application/json"
     }
     
-    # Ζητάμε δεδομένα των τελευταίων 90 ημερών (το API by default δίνει 180 αν δεν οριστεί)
+    # Ζητάμε δεδομένα των τελευταίων 90 ημερών
     date_from = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
     
     payload = {
@@ -120,29 +119,35 @@ def run():
                     continue
                 
                 title = item.get("title") or "—"
-                org = item.get("organization", {}).get("label", "—")
+                
+                # Αναθέτουσα Αρχή (από το πεδίο value του αντικειμένου organization)
+                org_data = item.get("organization") or {}
+                org = org_data.get("value", "—")
                 
                 # Ημερομηνία Λήξης
                 deadline_raw = item.get("finalDateTo") or item.get("finalDateFrom") or ""
                 deadline = deadline_raw.split(" ")[0] if deadline_raw else ""
                 
-                # Προϋπολογισμός
-                budget_num = item.get("totalCostVat") or item.get("totalCost") or 0
+                # Προϋπολογισμός (από το πεδίο amountWithoutVat)
+                budget_num = item.get("amountWithoutVat") or 0
                 if budget_num:
-                    budget_str = f"{budget_num:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+                    try:
+                        budget_str = f"{float(budget_num):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+                    except ValueError:
+                        budget_str = str(budget_num)
                 else:
                     budget_str = "—"
                 
-                # Εύρεση του matched CPV
-                item_cpvs = item.get("cpvs", [])
+                # CPV Code (από το πεδίο key της λίστας cpvs)
+                item_cpvs = item.get("cpvs") or []
                 matched_cpv = "—"
                 for c in item_cpvs:
-                    c_code = c.get("code")
+                    c_code = c.get("key")
                     if c_code in CPV_CODES:
                         matched_cpv = c_code
                         break
                 
-                # Link για το PDF
+                # Link για το PDF του διαγωνισμού
                 url = f"{API_BASE}/khmdhs-opendata/notice/attachment/{adam}"
                 
                 tender_obj = {
@@ -168,6 +173,7 @@ def run():
                     })
                     updated_count += 1
             
+            # Έλεγχος αν φτάσαμε στην τελευταία σελίδα
             if data.get("last") is True:
                 break
                 
