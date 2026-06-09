@@ -1,1 +1,40 @@
 
+name: ΕΣΗΔΗΣ Scraper
+
+on:
+  schedule:
+    - cron: '0 5,10,15,20 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  scrape-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+      - name: Run scraper
+        run: python esidis_scraper.py
+      - name: Commit results.json
+        run: |
+          git config user.name "ΕΣΗΔΗΣ Bot"
+          git config user.email "bot@esidis-monitor"
+          git add results.json scraper.log
+          git diff --staged --quiet || git commit -m "Update $(date +'%d/%m/%Y %H:%M')"
+          git push
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
+          exclude_assets: '.github,esidis_scraper.py,README.md,scraper.log'
