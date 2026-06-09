@@ -1,6 +1,6 @@
 """
-ΕΣΗΔΗΣ Portal Scraper (NEPPS-SEARCH) - TURBO & STABLE MODE
-Αναγκάζει το JSF να απαντήσει και περιμένει αυστηρά τον πίνακα.
+ΕΣΗΔΗΣ Scraper - ULTIMATE FORCE MODE + DIAGNOSTICS
+Πατάει ENTER αντί για κλικ και ελέγχει αν το ΕΣΗΔΗΣ μας έχει μπλοκάρει.
 """
 
 import json
@@ -15,9 +15,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.webdriver.common.keys import Keys
 
 CPV_CODES = [
     "31681500-8", "31158000-8", "34144900-7", "48422000-2", "32440000-9",
@@ -38,22 +36,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(
                     handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler(sys.stdout)])
 log = logging.getLogger(__name__)
 
-def load_existing() -> dict:
+def load_existing():
     if RESULTS_FILE.exists():
         try:
             with open(RESULTS_FILE, encoding="utf-8") as f:
                 data = json.load(f)
-                valid = {}
-                for r in data.get("tenders", []):
-                    eid = str(r.get("esidis_id", ""))
-                    if eid.isdigit():
-                        valid[eid] = r
-                return valid
-        except Exception:
-            pass
+                return {str(r["esidis_id"]): r for r in data.get("tenders", []) if str(r.get("esidis_id", "")).isdigit()}
+        except: pass
     return {}
 
-def save_results(tenders: dict) -> None:
+def save_results(tenders):
     cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     active = {k: v for k, v in tenders.items() if not v.get("deadline") or v["deadline"] >= cutoff}
     payload = {
@@ -71,74 +63,60 @@ def make_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--lang=el-GR")
+    # Προσποιούμαστε ότι είμαστε ένας απολύτως κανονικός χρήστης από Windows
     opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=opts)
-    driver.set_page_load_timeout(60)
+    driver.set_page_load_timeout(45)
     return driver
 
 def extract_rows(driver, cpv):
     results = []
     try:
-        # Περιμένουμε μέχρι να φανεί έστω ένα TR που να μην είναι header
-        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.XPATH, "//table//tr[td]")))
-        
-        # Σαρώνουμε ΟΛΟΥΣ τους πίνακες για ασφάλεια
         rows = driver.find_elements(By.TAG_NAME, "tr")
-        log.info(f"      Σαρώνονται {len(rows)} γραμμές HTML...")
+        log.info(f"      Διαβάζονται {len(rows)} γραμμές HTML από την οθόνη...")
         
-        found_tenders = 0
+        valid_found = 0
         for row in rows:
-            try:
-                cells = row.find_elements(By.TAG_NAME, "td")
-                if len(cells) >= 10:
-                    esidis_id = cells[0].text.strip()
-                    if not esidis_id.isdigit():
-                        continue
-                        
-                    title = cells[2].text.strip()
-                    budget = cells[3].text.strip()
-                    deadline_raw = cells[6].text.strip()
-                    matched_cpv = cells[7].text.strip()
-                    auth = cells[9].text.strip()
+            cells = row.find_elements(By.TAG_NAME, "td")
+            if len(cells) >= 11:
+                esidis_id = cells[0].text.strip()
+                if not esidis_id.isdigit():
+                    continue
                     
-                    clean_deadline = ""
-                    if deadline_raw and deadline_raw not in ("—", "-"):
-                        try:
-                            date_part = deadline_raw.split(" ")[0]
-                            if "-" in date_part:
-                                parts = date_part.split("-")
-                                if len(parts) == 3:
-                                    clean_deadline = f"{parts[2]}-{parts[1]}-{parts[0]}"
-                        except:
-                            clean_deadline = deadline_raw
-                    
+                title = cells[2].text.strip()
+                budget = cells[3].text.strip()
+                deadline_raw = cells[6].text.strip()
+                matched_cpv = cells[7].text.strip()
+                auth = cells[9].text.strip()
+                
+                clean_deadline = ""
+                if deadline_raw and deadline_raw not in ("—", "-"):
                     try:
-                        link = cells[0].find_element(By.TAG_NAME, "a")
-                        url = link.get_attribute("href")
+                        date_part = deadline_raw.split(" ")[0]
+                        if "-" in date_part:
+                            parts = date_part.split("-")
+                            if len(parts) == 3:
+                                clean_deadline = f"{parts[2]}-{parts[1]}-{parts[0]}"
                     except:
-                        url = f"https://nepps-search.eprocurement.gov.gr/actSearch/resources/search/{esidis_id}"
+                        clean_deadline = deadline_raw
                         
-                    results.append({
-                        "esidis_id": esidis_id,
-                        "title": title,
-                        "url": url,
-                        "contracting_authority": auth,
-                        "deadline": clean_deadline,
-                        "deadline_raw": deadline_raw,
-                        "budget": f"{budget} €" if budget and budget not in ("—", "-") else "—",
-                        "cpv_matched": matched_cpv if matched_cpv else cpv,
-                        "scraped_at": datetime.now().isoformat()
-                    })
-                    found_tenders += 1
-            except StaleElementReferenceException:
-                continue
-        log.info(f"      Βρέθηκαν {found_tenders} έγκυροι διαγωνισμοί σε αυτή τη σελίδα.")
-    except TimeoutException:
-        log.info("      Δεν φορτώθηκε κανένας πίνακας (Πιθανώς 0 αποτελέσματα).")
+                results.append({
+                    "esidis_id": esidis_id,
+                    "title": title,
+                    "url": f"https://nepps-search.eprocurement.gov.gr/actSearch/resources/search/{esidis_id}",
+                    "contracting_authority": auth,
+                    "deadline": clean_deadline,
+                    "deadline_raw": deadline_raw,
+                    "budget": f"{budget} €" if budget and budget not in ("—", "-") else "—",
+                    "cpv_matched": matched_cpv if matched_cpv else cpv,
+                    "scraped_at": datetime.now().isoformat()
+                })
+                valid_found += 1
+                
+        log.info(f"      Βρέθηκαν {valid_found} διαγωνισμοί σε αυτόν τον πίνακα!")
     except Exception as e:
-        log.error(f"      Σφάλμα εξαγωγής πίνακα: {e}")
+        log.error(f"Σφάλμα κατά την ανάγνωση του πίνακα: {e}")
     return results
 
 def run():
@@ -147,72 +125,60 @@ def run():
     new_count = 0
     
     driver = make_driver()
-    wait = WebDriverWait(driver, 20)
-    
     try:
-        # Φορτώνουμε τη σελίδα ΜΙΑ ΦΟΡΑ και κάνουμε τις αναζητήσεις (πολύ πιο γρήγορο)
-        log.info("Αρχική φόρτωση του ΕΣΗΔΗΣ...")
+        # Δοκιμαστικό φόρτωμα για να δούμε τι βλέπει το ρομπότ
         driver.get(SEARCH_URL)
-        time.sleep(5)
+        time.sleep(3)
+        log.info(f"ΤΙΤΛΟΣ ΣΕΛΙΔΑΣ ΠΟΥ ΒΛΕΠΕΙ ΤΟ ΡΟΜΠΟΤ: '{driver.title}'")
+        
+        if "Αναζήτηση" not in driver.title and "Εθνικό" not in driver.title:
+            log.warning("ΠΡΟΣΟΧΗ: Η σελίδα ΔΕΝ φορτώθηκε σωστά. Πιθανό μπλοκάρισμα από Firewall (IP Block)!")
+            log.info("Περιεχόμενο που επιστράφηκε: " + driver.page_source[:500])
         
         for cpv in CPV_CODES:
             try:
-                log.info(f"CPV: {cpv}")
-                
-                # Βρίσκουμε το πεδίο
-                cpv_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//tr[.//label[contains(text(), 'Κωδικός CPV')]]//input[@type='text']")))
-                cpv_input.clear()
-                time.sleep(0.5)
-                cpv_input.send_keys(cpv)
-                
-                # Βρίσκουμε το κουμπί
-                search_btn = driver.find_element(By.XPATH, "//*[text()='Αναζήτηση' and not(contains(@title, 'Αναζήτηση'))]")
-                driver.execute_script("arguments[0].scrollIntoView(true);", search_btn)
-                time.sleep(1)
-                
-                # Κλικ μέσω JS για αποφυγή προβλημάτων επικάλυψης στοιχείων
-                driver.execute_script("arguments[0].click();", search_btn)
-                
-                log.info("    Αναμονή δυναμικής φόρτωσης (JSF)...")
-                # Περιμένουμε το "loading" εικονίδιο του ΕΣΗΔΗΣ να εξαφανιστεί αν υπάρχει
-                time.sleep(4) 
-                
-                page = 1
-                while page <= 2: # 2 σελίδες max για να μην αργεί αιώνια
-                    rows = extract_rows(driver, cpv)
-                    if not rows:
-                        break
-                        
-                    for t in rows:
-                        if t["esidis_id"] not in existing:
-                            existing[t["esidis_id"]] = t
-                            new_count += 1
-                        else:
-                            existing[t["esidis_id"]].update({"deadline": t["deadline"], "budget": t["budget"], "scraped_at": t["scraped_at"]})
-                    
-                    try:
-                        next_link = driver.find_element(By.XPATH, "//a[contains(text(), 'Επόμενη') or contains(text(), '›')]")
-                        if link.is_displayed() and "dis" not in next_link.get_attribute("class").lower():
-                            log.info("      Πάμε στην επόμενη σελίδα...")
-                            driver.execute_script("arguments[0].click();", next_link)
-                            time.sleep(4)
-                            page += 1
-                        else:
-                            break
-                    except:
-                        break
-                        
-            except Exception as e:
-                log.warning(f"    Σφάλμα/Timeout στο CPV {cpv}. Πάμε στο επόμενο.")
-                # Αν μπλοκάρει, κάνουμε refresh για να καθαρίσει η φόρμα για το επόμενο CPV
+                log.info(f"-> Ερευνούμε το CPV: {cpv}")
                 driver.get(SEARCH_URL)
                 time.sleep(3)
+                
+                # Βρίσκουμε το πεδίο με απόλυτη ακρίβεια
+                inputs = driver.find_elements(By.XPATH, "//tr[contains(., 'CPV')]//input[@type='text']")
+                cpv_input = None
+                for inp in inputs:
+                    if inp.is_displayed():
+                        cpv_input = inp
+                        break
+                        
+                if not cpv_input:
+                    log.error("      Δεν βρέθηκε το πεδίο εισαγωγής CPV στην οθόνη.")
+                    continue
+                
+                # Καθαρίζουμε, γράφουμε και πατάμε ENTER!
+                cpv_input.clear()
+                cpv_input.send_keys(cpv)
+                time.sleep(1)
+                cpv_input.send_keys(Keys.ENTER)
+                log.info("      Πατήθηκε ENTER. Αναμονή 8 δευτερόλεπτα...")
+                
+                time.sleep(8)
+                
+                # Εξαγωγή δεδομένων
+                rows = extract_rows(driver, cpv)
+                for t in rows:
+                    if t["esidis_id"] not in existing:
+                        existing[t["esidis_id"]] = t
+                        new_count += 1
+                    else:
+                        existing[t["esidis_id"]].update({"deadline": t["deadline"], "budget": t["budget"], "scraped_at": t["scraped_at"]})
+                
+            except Exception as e:
+                log.warning(f"      Σφάλμα στο CPV {cpv}: {e}")
                 
     finally:
         driver.quit()
         
     save_results(existing)
-    log.info(f"Ολοκληρώθηκε με ασφάλεια. Νέοι ΕΣΗΔΗΣ: {new_count} | Σύνολο ΕΣΗΔΗΣ: {len(existing)}")
+    log.info(f"Ολοκληρώθηκε. Νέοι ΕΣΗΔΗΣ: {new_count} | Σύνολο ΕΣΗΔΗΣ: {len(existing)}")
     log.info("=" * 60)
 
 if __name__ == "__main__":
