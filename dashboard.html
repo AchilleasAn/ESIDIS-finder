@@ -193,7 +193,6 @@
     font-weight: 500;
     cursor: pointer;
     transition: opacity 0.15s;
-    margin-left: auto;
   }
 
   .btn-refresh:hover { opacity: 0.85; }
@@ -206,6 +205,7 @@
     font-family: var(--mono);
     font-size: 11px;
     color: var(--muted);
+    margin-left: auto;
   }
 
   /* ── Table ── */
@@ -240,9 +240,6 @@
 
   th:hover { color: var(--text); }
 
-  th .sort-icon { margin-left: 4px; opacity: 0.4; }
-  th.sorted .sort-icon { opacity: 1; color: var(--accent); }
-
   tbody tr {
     border-bottom: 1px solid var(--border);
     transition: background 0.1s;
@@ -255,7 +252,6 @@
     vertical-align: middle;
   }
 
-  /* Α/Α column */
   .td-id {
     font-family: var(--mono);
     font-size: 13px;
@@ -269,7 +265,6 @@
   }
   .td-id a:hover { text-decoration: underline; }
 
-  /* Title */
   .td-title {
     max-width: 340px;
     font-size: 13px;
@@ -277,14 +272,12 @@
     line-height: 1.4;
   }
 
-  /* Authority */
   .td-auth {
     max-width: 220px;
     font-size: 12px;
     color: var(--muted);
   }
 
-  /* Deadline */
   .td-deadline {
     white-space: nowrap;
     font-family: var(--mono);
@@ -307,7 +300,6 @@
   .deadline-badge.normal  { background: var(--green-lo);  color: #3fb950;      border: 1px solid #1a4520; }
   .deadline-badge.unknown { background: var(--surface);   color: var(--muted); border: 1px solid var(--border); }
 
-  /* Budget */
   .td-budget {
     white-space: nowrap;
     font-family: var(--mono);
@@ -316,7 +308,6 @@
     color: var(--text);
   }
 
-  /* CPV */
   .td-cpv {
     white-space: nowrap;
     font-family: var(--mono);
@@ -324,7 +315,6 @@
     color: var(--muted);
   }
 
-  /* ── Empty state ── */
   .empty {
     text-align: center;
     padding: 80px 24px;
@@ -335,7 +325,6 @@
   .empty-title { font-size: 16px; font-weight: 500; color: var(--text); margin-bottom: 8px; }
   .empty-sub { font-size: 13px; max-width: 400px; margin: 0 auto; }
 
-  /* ── Loading ── */
   .loading {
     text-align: center;
     padding: 60px 24px;
@@ -356,14 +345,22 @@
 
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* ── Scrollbar ── */
+  /* Settings panel styling */
+  #settings-panel {
+    display: none;
+    padding: 12px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
-  /* ── Responsive ── */
-  .hide-sm { }
   @media (max-width: 900px) {
     .hide-sm { display: none; }
     .td-title { max-width: 200px; }
@@ -423,18 +420,20 @@
     <option value="deadline">Ταξινόμηση: Deadline (αύξ.)</option>
     <option value="deadline-desc">Ταξινόμηση: Deadline (φθίν.)</option>
     <option value="budget-desc">Ταξινόμηση: Προϋπολογισμός (φθίν.)</option>
-    <option value="id">Ταξινόμηση: Α/Α ΕΣΗΔΗΣ</option>
+    <option value="id">Ταξινόμηση: ΑΔΑΜ ΚΗΜΔΗΣ</option>
   </select>
 
   <span class="count-badge" id="filtered-count">0</span>
 
-  <button class="btn-refresh" onclick="loadData()">
-    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-      <path d="M11 6.5A4.5 4.5 0 1 1 6.5 2a4.5 4.5 0 0 1 3.18 1.32" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-      <path d="M9 1.5l.5 2-2 .5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    Ανανέωση
-  </button>
+  <button class="btn-refresh" onclick="loadData()">🔄 Ανανέωση Σελίδας</button>
+  <button class="btn-refresh" id="btn-ondemand" onclick="triggerScraper()" style="background: var(--green);">⚡ Έλεγχος Τώρα</button>
+  <button class="btn-refresh" onclick="toggleSettings()" style="background: var(--border-hi); padding: 7px 10px;">⚙️</button>
+</div>
+
+<div id="settings-panel">
+  <span style="font-size: 12px; color: var(--muted);">Για On-Demand έλεγχο, εισάγετε ένα GitHub Personal Access Token (PAT):</span>
+  <input type="password" id="gh-token-input" placeholder="ghp_..." style="background: var(--bg); border: 1px solid var(--border-hi); color: var(--text); padding: 5px 10px; border-radius: 4px; font-size: 12px; width: 280px; outline: none;">
+  <button onclick="saveSettings()" style="background: var(--accent); color: white; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;">Αποθήκευση</button>
 </div>
 
 <div class="table-wrap">
@@ -447,25 +446,19 @@
 </div>
 
 <script>
-// ─── State ────────────────────────────────────────────────────────────────────
 let allTenders = [];
-let sortKey = 'deadline';
-let sortDir = 1;
 
-// ─── Load data ────────────────────────────────────────────────────────────────
 async function loadData() {
   const container = document.getElementById('table-container');
   container.innerHTML = '<div class="loading"><div class="spinner"></div><br>Φόρτωση...</div>';
 
   try {
-    // Φορτώνει το results.json από τον ίδιο φάκελο
     const resp = await fetch('./results.json?' + Date.now());
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
 
     allTenders = data.tenders || [];
 
-    // Metadata
     const updated = data.last_updated
       ? new Date(data.last_updated).toLocaleString('el-GR', {
           day: '2-digit', month: '2-digit', year: 'numeric',
@@ -482,16 +475,12 @@ async function loadData() {
       <div class="empty">
         <div class="empty-icon">⚠️</div>
         <div class="empty-title">Δεν βρέθηκε αρχείο δεδομένων</div>
-        <div class="empty-sub">
-          Εκτέλεσε πρώτα το <code>esidis_scraper.py</code> για να δημιουργηθεί
-          το <code>results.json</code> στον ίδιο φάκελο με αυτό το αρχείο.
-        </div>
+        <div class="empty-sub">Περιμένετε να ολοκληρωθεί το πρώτο αυτόματο τρέξιμο του Scraper στο GitHub.</div>
       </div>`;
     console.error(e);
   }
 }
 
-// ─── Urgency helpers ──────────────────────────────────────────────────────────
 function getUrgency(deadline) {
   if (!deadline) return 'unknown';
   const today = new Date(); today.setHours(0,0,0,0);
@@ -517,7 +506,6 @@ function urgencyLabel(deadline) {
   return `<span class="deadline-badge normal">🟢 ${fmt}</span>`;
 }
 
-// ─── Stats ────────────────────────────────────────────────────────────────────
 function updateStats() {
   const active = allTenders.filter(t => getUrgency(t.deadline) !== 'expired');
   const urgent = active.filter(t => getUrgency(t.deadline) === 'urgent').length;
@@ -530,51 +518,37 @@ function updateStats() {
   document.getElementById('stat-normal').textContent = normal;
 }
 
-// ─── Budget parsing for sort ──────────────────────────────────────────────────
 function parseBudgetNum(str) {
   if (!str || str === '—') return 0;
   return parseFloat(str.replace(/\./g,'').replace(',','.').replace(/[^0-9.]/g,'')) || 0;
 }
 
-// ─── Filter + Sort + Render ───────────────────────────────────────────────────
 function renderTable() {
   const query    = document.getElementById('search-input').value.toLowerCase();
   const urgency  = document.getElementById('filter-urgency').value;
   const sortMode = document.getElementById('sort-by').value;
 
   let data = allTenders.filter(t => {
-    // Filter expired by default
     if (getUrgency(t.deadline) === 'expired') return false;
-
-    // Urgency filter
     if (urgency !== 'all' && getUrgency(t.deadline) !== urgency) return false;
 
-    // Search filter
     if (query) {
       const haystack = [
         t.esidis_id, t.title, t.contracting_authority, t.cpv_matched
       ].join(' ').toLowerCase();
       if (!haystack.includes(query)) return false;
     }
-
     return true;
   });
 
-  // Sort
   data.sort((a, b) => {
     if (sortMode === 'deadline' || sortMode === 'deadline-desc') {
       const da = a.deadline || '9999-12-31';
       const db = b.deadline || '9999-12-31';
-      return sortMode === 'deadline'
-        ? da.localeCompare(db)
-        : db.localeCompare(da);
+      return sortMode === 'deadline' ? da.localeCompare(db) : db.localeCompare(da);
     }
-    if (sortMode === 'budget-desc') {
-      return parseBudgetNum(b.budget) - parseBudgetNum(a.budget);
-    }
-    if (sortMode === 'id') {
-      return a.esidis_id.localeCompare(b.esidis_id, undefined, {numeric: true});
-    }
+    if (sortMode === 'budget-desc') return parseBudgetNum(b.budget) - parseBudgetNum(a.budget);
+    if (sortMode === 'id') return a.esidis_id.localeCompare(b.esidis_id, undefined, {numeric: true});
     return 0;
   });
 
@@ -585,7 +559,6 @@ function renderTable() {
       <div class="empty">
         <div class="empty-icon">🔍</div>
         <div class="empty-title">Δεν βρέθηκαν αποτελέσματα</div>
-        <div class="empty-sub">Δοκίμασε διαφορετικά φίλτρα ή εκτέλεσε ξανά το scraper.</div>
       </div>`;
     return;
   }
@@ -593,9 +566,7 @@ function renderTable() {
   const rows = data.map(t => `
     <tr>
       <td class="td-id">
-        ${t.url
-          ? `<a href="${t.url}" target="_blank" rel="noopener">${t.esidis_id}</a>`
-          : t.esidis_id}
+        ${t.url ? `<a href="${t.url}" target="_blank" rel="noopener">${t.esidis_id}</a>` : t.esidis_id}
       </td>
       <td class="td-title">${escHtml(t.title || '—')}</td>
       <td class="td-auth hide-sm">${escHtml(t.contracting_authority || '—')}</td>
@@ -609,7 +580,7 @@ function renderTable() {
     <table>
       <thead>
         <tr>
-          <th>Α/Α ΕΣΗΔΗΣ</th>
+          <th>ΑΔΑΜ ΚΗΜΔΗΣ</th>
           <th>Τίτλος</th>
           <th class="hide-sm">Αναθέτουσα Αρχή</th>
           <th>Καταληκτική</th>
@@ -622,17 +593,82 @@ function renderTable() {
 }
 
 function escHtml(str) {
-  return String(str)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ─── Event listeners ──────────────────────────────────────────────────────────
+// ─── On-Demand Logic ──────────────────────────────────────────────────────────
+function toggleSettings() {
+  const panel = document.getElementById('settings-panel');
+  panel.style.display = panel.style.display === 'flex' ? 'none' : 'flex';
+  if (panel.style.display === 'flex') {
+    document.getElementById('gh-token-input').value = localStorage.getItem('gh_token') || '';
+  }
+}
+
+function saveSettings() {
+  const token = document.getElementById('gh-token-input').value.trim();
+  localStorage.setItem('gh_token', token);
+  alert('Το Token αποθηκεύτηκε με ασφάλεια τοπικά στον browser σου!');
+  document.getElementById('settings-panel').style.display = 'none';
+}
+
+async function triggerScraper() {
+  const token = localStorage.getItem('gh_token');
+  if (!token) {
+    alert('Παρακαλώ κάντε κλικ στο γρανάζι ⚙️ και προσθέστε ένα GitHub Token πρώτα!');
+    toggleSettings();
+    return;
+  }
+
+  const btn = document.getElementById('btn-ondemand');
+  const originalText = btn.innerHTML;
+  btn.disabled = true;
+  btn.style.opacity = '0.6';
+  btn.innerHTML = '⏳ Αποστολή...';
+
+  // Αυτόματη ανίχνευση του username και του repository name από το URL της σελίδας
+  const hostname = window.location.hostname;
+  const pathname = window.location.pathname;
+  let owner = "AchilleasAn"; 
+  let repo = "ESIDIS-finder";   
+  
+  if (hostname.includes("github.io")) {
+    owner = hostname.split(".")[0];
+    repo = pathname.split("/")[1] || repo;
+  }
+
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/scrape.yml/dispatches`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ref: 'main' }) 
+    });
+
+    if (response.ok) {
+      alert('⚡ Ο Scraper ξεκίνησε στο GitHub! Σε 1-2 λεπτά θα έχουν κατέβει οι νέοι διαγωνισμοί. Η σελίδα θα ανανεωθεί αυτόματα σε 90 δευτερόλεπτα.');
+      setTimeout(() => { loadData(); }, 90000);
+    } else {
+      const errData = await response.json().catch(() => ({}));
+      alert('❌ Αποτυχία εκκίνησης: ' + (errData.message || response.statusText));
+    }
+  } catch (e) {
+    alert('❌ Σφάλμα δικτύου: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.innerHTML = originalText;
+  }
+}
+
 document.getElementById('search-input').addEventListener('input', renderTable);
 document.getElementById('filter-urgency').addEventListener('change', renderTable);
 document.getElementById('sort-by').addEventListener('change', renderTable);
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
 loadData();
 </script>
 </body>
