@@ -64,7 +64,6 @@
   .adam-link { color: var(--primary-hover); text-decoration: none; font-weight: 500;}
   .adam-link:hover { text-decoration: underline; }
   
-  /* Modal Styles */
   .modal-overlay {
     display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     background: rgba(0,0,0,0.7); z-index: 1000; justify-content: center; align-items: center;
@@ -89,27 +88,29 @@
 <header>
   <div class="title">ΚΗΜΔΗΣ On-Demand Monitor</div>
   <div class="meta">
-      Ημερομηνία Αναζήτησης: <strong id="search-date" style="color:var(--text);">—</strong> | 
-      Σύνολο: <strong id="total-count" style="color:var(--text);">0</strong>
+      Διάστημα: <strong id="search-date" style="color:var(--text);">—</strong> | 
+      Σύνολο: <strong id="total-count" style="color:var(--text);">0</strong> |
+      <span style="font-size:11px;">Τελ. Ανανέωση: <span id="last-update">—</span></span>
   </div>
 </header>
 
 <div class="controls">
     <button class="btn btn-green" id="btn-ondemand" onclick="triggerScraper()">⚡ Έλεγχος Τώρα</button>
-    <button class="btn" onclick="loadData()">🔄 Ανανέωση Σελίδας</button>
+    <button class="btn" id="btn-refresh" onclick="loadData()">🔄 Ανανέωση Σελίδας</button>
     
     <select id="sort-by" class="sort-dropdown" onchange="renderTable()">
-      <option value="default">Ταξινόμηση: Προεπιλογή</option>
+      <option value="default">Ταξινόμηση: Νεότερα πρώτα</option>
       <option value="auth-asc">Αναθέτουσα Αρχή (Α → Ω)</option>
       <option value="auth-desc">Αναθέτουσα Αρχή (Ω → Α)</option>
-      <option value="title-asc">Τίτλος Διαγωνισμού (Α → Ω)</option>
+      <option value="title-asc">Τίτλος (Α → Ω)</option>
+      <option value="budget-desc">Προϋπολογισμός (Φθίνουσα)</option>
     </select>
 
     <button class="btn btn-icon" onclick="toggleSettings()">⚙️</button>
 </div>
 
 <div id="settings-panel">
-  <span style="font-size: 12px; color: var(--muted);">Εισάγετε GitHub PAT (Token) για το κουμπί Έλεγχος Τώρα:</span>
+  <span style="font-size: 12px; color: var(--muted);">GitHub PAT (Token):</span>
   <input type="password" id="gh-token-input" placeholder="ghp_..." style="background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 7px 10px; border-radius: 4px; font-size: 12px; width: 280px; outline: none;">
   <button class="btn" onclick="saveSettings()">Αποθήκευση</button>
 </div>
@@ -118,15 +119,16 @@
   <table>
     <thead>
       <tr>
+        <th>Ημ/νια Δημοσίευσης</th>
         <th>Αναθέτουσα Αρχή</th>
         <th>Τίτλος</th>
         <th>Προϋπολογισμός</th>
         <th>ΑΔΑ / ΑΔΑΜ</th>
-        <th>Κείμενο Διακήρυξης</th>
+        <th>Κείμενο</th>
       </tr>
     </thead>
     <tbody id="table-body">
-      <tr><td colspan="5" style="text-align:center; padding: 40px; color: var(--muted);">Φόρτωση δεδομένων...</td></tr>
+      <tr><td colspan="6" style="text-align:center; padding: 40px; color: var(--muted);">Φόρτωση δεδομένων...</td></tr>
     </tbody>
   </table>
 </div>
@@ -142,62 +144,85 @@
 </div>
 
 <script>
-let originalData = []; // Κρατάει τα αρχικά δεδομένα όπως έρχονται
+let originalData = [];
 
 async function loadData() {
+  const refreshBtn = document.getElementById('btn-refresh');
+  if(refreshBtn) {
+      refreshBtn.innerHTML = '⏳ Φόρτωση...';
+      refreshBtn.disabled = true;
+  }
+  
   try {
-    const resp = await fetch('./results.json?' + Date.now());
+    // Το ?nocache "ξεγελάει" τον browser για να κατεβάσει το φρέσκο αρχείο
+    const resp = await fetch('./results.json?nocache=' + new Date().getTime(), {cache: "no-store"});
     if (!resp.ok) throw new Error();
     const data = await resp.json();
     
     document.getElementById('search-date').textContent = data.date_searched || '—';
     document.getElementById('total-count').textContent = data.total || '0';
-    originalData = data.tenders || [];
     
-    renderTable(); // Καλεί τη συνάρτηση που σχεδιάζει τον πίνακα
+    if (data.last_updated) {
+        const d = new Date(data.last_updated);
+        document.getElementById('last-update').textContent = d.toLocaleTimeString('el-GR', {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+    }
+    
+    originalData = data.tenders || [];
+    renderTable();
     
   } catch(e) {
-    document.getElementById('table-body').innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 40px; color: #ff7b72;">Δεν βρέθηκε αρχείο δεδομένων (results.json). Πατήστε το "Έλεγχος Τώρα" για να ξεκινήσει.</td></tr>';
+    document.getElementById('table-body').innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 40px; color: #ff7b72;">Δεν βρέθηκε αρχείο δεδομένων (results.json). Πατήστε το "Έλεγχος Τώρα" για να ξεκινήσει.</td></tr>';
+  } finally {
+      if(refreshBtn) {
+          refreshBtn.innerHTML = '🔄 Ανανέωση Σελίδας';
+          refreshBtn.disabled = false;
+      }
   }
 }
 
-// Νέα συνάρτηση που αναλαμβάνει το Σορτάρισμα και το Σχέδιο
+function parseBudget(str) {
+  if (!str || str === '—') return 0;
+  return parseFloat(str.replace(/\./g,'').replace(',','.').replace(/[^0-9.]/g,'')) || 0;
+}
+
 function renderTable() {
     const tbody = document.getElementById('table-body');
     if(originalData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 40px; color: var(--muted);">Δεν βρέθηκαν διαγωνισμοί την αναγραφόμενη ημερομηνία.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 40px; color: var(--muted);">Δεν βρέθηκαν διαγωνισμοί.</td></tr>';
         return;
     }
 
-    // Δημιουργούμε ένα αντίγραφο των δεδομένων για να το ταξινομήσουμε
     let displayData = [...originalData];
     const sortMode = document.getElementById('sort-by').value;
 
-    // Λογική Αλφαβητικής Ταξινόμησης (με υποστήριξη Ελληνικών)
     if (sortMode === 'auth-asc') {
         displayData.sort((a, b) => a.contracting_authority.localeCompare(b.contracting_authority, 'el'));
     } else if (sortMode === 'auth-desc') {
         displayData.sort((a, b) => b.contracting_authority.localeCompare(a.contracting_authority, 'el'));
     } else if (sortMode === 'title-asc') {
         displayData.sort((a, b) => a.title.localeCompare(b.title, 'el'));
+    } else if (sortMode === 'budget-desc') {
+        displayData.sort((a, b) => parseBudget(b.budget) - parseBudget(a.budget));
+    } else {
+        // Προεπιλογή: Φθίνουσα με βάση την Ημερομηνία
+        displayData.sort((a, b) => (b.published_date || '').localeCompare(a.published_date || ''));
     }
 
-    // Σχεδιασμός πίνακα
     tbody.innerHTML = displayData.map((t) => {
-      // Βρίσκουμε το πραγματικό index (για να ανοίγει σωστά το Modal)
       const realIndex = originalData.indexOf(t);
       
       return `
       <tr>
-        <td style="max-width: 220px; font-size: 13px;">${t.contracting_authority}</td>
-        <td style="max-width: 350px; font-size: 13px; line-height: 1.4;">${t.title}</td>
+        <td style="font-family: monospace; font-size:12px; color:var(--muted);">${t.published_date || '—'}</td>
+        <td style="max-width: 200px; font-size: 13px;">${t.contracting_authority}</td>
+        <td style="max-width: 320px; font-size: 13px; line-height: 1.4;">${t.title}</td>
         <td style="font-weight: 500; font-family: monospace;">${t.budget}</td>
         <td>
           <div style="font-size: 11px; color: var(--muted); margin-bottom:4px;">ΑΔΑ: ${t.ada}</div>
           <a href="${t.pdf_url}" target="_blank" class="adam-link">ΑΔΑΜ: ${t.adam}</a>
         </td>
         <td>
-          <button class="btn" style="padding: 6px 12px; font-size: 12px;" onclick="showText(${realIndex})">📄 Ανάγνωση</button>
+          <button class="btn" style="padding: 6px 10px; font-size: 12px;" onclick="showText(${realIndex})">📄</button>
         </td>
       </tr>
     `}).join('');
@@ -214,7 +239,6 @@ function closeModal() {
   document.getElementById('text-modal').style.display = 'none';
 }
 
-// Ρυθμίσεις Token & On-Demand
 function toggleSettings() {
   const panel = document.getElementById('settings-panel');
   panel.style.display = panel.style.display === 'flex' ? 'none' : 'flex';
@@ -239,16 +263,13 @@ async function triggerScraper() {
   }
 
   const btn = document.getElementById('btn-ondemand');
-  const originalText = btn.innerHTML;
   btn.disabled = true;
-  btn.style.opacity = '0.6';
-  btn.innerHTML = '⏳ Εκτέλεση (Παρακαλώ περιμένετε)...';
+  btn.innerHTML = '⏳ Εκτέλεση... (Θα πάρει ~1 λεπτό)';
 
   const hostname = window.location.hostname;
   const pathname = window.location.pathname;
   let owner = "AchilleasAn"; 
   let repo = "ESIDIS-finder";   
-  
   if (hostname.includes("github.io")) {
     owner = hostname.split(".")[0];
     repo = pathname.split("/")[1] || repo;
@@ -267,18 +288,16 @@ async function triggerScraper() {
     });
 
     if (response.ok) {
-      alert('Η αναζήτηση στο ΚΗΜΔΗΣ ξεκίνησε! Επειδή κατεβάζει και διαβάζει τα PDF, μπορεί να πάρει 1-3 λεπτά. Η σελίδα θα ανανεωθεί αυτόματα μόλις τελειώσει.');
-      setTimeout(() => { loadData(); }, 120000);
+      alert('Το ρομπότ ξεκίνησε! Περιμένετε 1 λεπτό και πατήστε "Ανανέωση Σελίδας".');
     } else {
       const errData = await response.json().catch(() => ({}));
-      alert('❌ Σφάλμα εκκίνησης: ' + (errData.message || response.statusText));
+      alert('❌ Σφάλμα: ' + (errData.message || response.statusText));
     }
   } catch (e) {
-    alert('❌ Σφάλμα δικτύου: ' + e.message);
+    alert('❌ Σφάλμα: ' + e.message);
   } finally {
     btn.disabled = false;
-    btn.style.opacity = '1';
-    btn.innerHTML = originalText;
+    btn.innerHTML = '⚡ Έλεγχος Τώρα';
   }
 }
 
