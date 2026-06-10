@@ -1,14 +1,16 @@
 """
-ΚΗΜΔΗΣ Opendata API Scraper - Total Reset
-Ζητάει απευθείας διαγωνισμούς με βάση τα CPV και την Καταληκτική Ημερομηνία Υποβολής.
+ΚΗΜΔΗΣ Opendata API Scraper - On Demand Edition
+Αναζήτηση δημοσιεύσεων της "προηγούμενης ημέρας" με εξαγωγή PDF.
 """
 
 import json
 import logging
 import sys
+import io
 from datetime import datetime, timedelta
 from pathlib import Path
 import requests
+import PyPDF2
 
 CPV_CODES = [
     "31681500-8", "31158000-8", "34144900-7", "48422000-2", "32440000-9",
@@ -31,121 +33,117 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(
                     handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler(sys.stdout)])
 log = logging.getLogger(__name__)
 
+def extract_pdf_text(adam):
+    """Κατεβάζει το PDF από το ΚΗΜΔΗΣ και εξάγει τις πρώτες 3 σελίδες ως κείμενο."""
+    url = f"{API_BASE}/khmdhs-opendata/notice/attachment/{adam}"
+    try:
+        res = requests.get(url, timeout=20)
+        if res.ok and 'application/pdf' in res.headers.get('Content-Type', ''):
+            pdf_file = io.BytesIO(res.content)
+            reader = PyPDF2.PdfReader(pdf_file)
+            text = ""
+            for i in range(min(3, len(reader.pages))):
+                page_text = reader.pages[i].extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            
+            clean_text = text.strip()
+            if not clean_text:
+                return "Το PDF είναι σκαναρισμένη εικόνα. Αδυναμία εξαγωγής κειμένου."
+            return clean_text
+    except Exception as e:
+        log.error(f"Σφάλμα ανάγνωσης PDF για {adam}: {e}")
+    return "Αδυναμία λήψης αρχείου."
+
 def run():
     log.info("=" * 60)
-    log.info("ΕΚΚΙΝΗΣΗ ΚΗΜΔΗΣ API - TOTAL RESET")
+    # Υπολογισμός "χθεσινής" ημερομηνίας (δηλαδή της προηγούμενης μέρας από την εκτέλεση)
+    yesterday = datetime.now() - timedelta(days=1)
+    target_date = yesterday.strftime("%Y-%m-%d")
     
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
+    log.info(f"ΕΚΚΙΝΗΣΗ ΚΗΜΔΗΣ API (On Demand) - Αναζήτηση δημοσιεύσεων για: {target_date}")
     
-    # Ορίζουμε το παράθυρο αναζήτησης: Από σήμερα έως και +7 ημέρες
-    today = datetime.now()
-    date_from_str = today.strftime("%Y-%m-%d")
-    date_to_str = (today + timedelta(days=7)).strftime("%Y-%m-%d")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    all_tenders = []
     
-    log.info(f"Φίλτρο Καταληκτικής Ημερομηνίας: Από {date_from_str} έως {date_to_str}")
-    
-    payload = {
-        "cpvItems": CPV_CODES,
-        "finalDateFrom": date_from_str,
-        "finalDateTo": date_to_str
-    }
-    
-    all_tenders = {}
-    page = 0
-    
-    while True:
-        log.info(f"Χτύπημα στο KHMDS API (σελίδα {page})...")
-        try:
-            res = requests.post(f"{SEARCH_ENDPOINT}?page={page}", json=payload, headers=headers, timeout=30)
-            res.raise_for_status()
-            data = res.json()
-            
-            content = data.get("content", [])
-            if not content:
-                break
+    for cpv in CPV_CODES:
+        log.info(f"-> Ελέγχω CPV: {cpv}")
+        payload = {
+            "cpvItems": [cpv],
+            "dateFrom": target_date,
+            "dateTo": target_date
+        }
+        
+        page = 0
+        while True:
+            try:
+                res = requests.post(f"{SEARCH_ENDPOINT}?page={page}", json=payload, headers=headers, timeout=15)
+                if not res.ok: break
                 
-            log.info(f" -> Βρέθηκαν {len(content)} εγγραφές.")
-            
-            for item in content:
-                adam = item.get("referenceNumber") or item.get("sysCode")
-                if not adam:
-                    continue
+                data = res.json()
+                content = data.get("content", [])
+                if not content: break
                 
-                title = item.get("title") or "—"
-                
-                # Οργανισμός (Αναθέτουσα Αρχή)
-                org_val = item.get("organization") or {}
-                if isinstance(org_val, dict):
-                    org = org_val.get("value") or org_val.get("label") or "—"
-                else:
-                    org = str(org_val)
+                for item in content:
+                    adam = item.get("referenceNumber") or item.get("sysCode")
+                    if not adam: continue
                     
-                # Καταληκτική Ημερομηνία
-                deadline_raw = item.get("finalDateTo") or item.get("finalDateFrom") or ""
-                deadline = str(deadline_raw).split(" ")[0] if deadline_raw else ""
+                    # Αποφυγή διπλοτυπιών
+                    if any(t['adam'] == adam for t in all_tenders):
+                        continue
+                    
+                    ada = item.get("internetNo") or "—"
+                    title = item.get("title") or "—"
+                    
+                    org_val = item.get("organization") or {}
+                    if isinstance(org_val, dict):
+                        org = org_val.get("value") or org_val.get("label") or "—"
+                    else:
+                        org = str(org_val)
+                        
+                    budget_num = item.get("amountWithoutVat") or 0
+                    if budget_num:
+                        try:
+                            budget_str = f"{float(budget_num):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+                        except:
+                            budget_str = str(budget_num)
+                    else:
+                        budget_str = "—"
+                    
+                    log.info(f"    Βρέθηκε: {adam} - Κατέβασμα κειμένου...")
+                    pdf_text = extract_pdf_text(adam)
+                    
+                    all_tenders.append({
+                        "adam": adam,
+                        "ada": ada,
+                        "title": title,
+                        "contracting_authority": org,
+                        "budget": budget_str,
+                        "cpv_matched": cpv,
+                        "pdf_url": f"{API_BASE}/khmdhs-opendata/notice/attachment/{adam}",
+                        "pdf_text": pdf_text,
+                        "published_date": target_date
+                    })
                 
-                # Προϋπολογισμός (Συνολική Αξία)
-                budget_num = item.get("amountWithoutVat") or item.get("totalCostFrom") or 0
-                if not budget_num:
-                    budget_obj = item.get("budget") or item.get("totalAmount") or {}
-                    if isinstance(budget_obj, dict):
-                        budget_num = budget_obj.get("amountWithoutVat") or budget_obj.get("value") or 0
-                        
-                budget_str = "—"
-                if budget_num:
-                    try:
-                        budget_str = f"{float(budget_num):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
-                    except:
-                        budget_str = str(budget_num)
-                        
-                # Match CPV
-                item_cpvs = item.get("cpvs") or []
-                matched_cpv = "—"
-                for c in item_cpvs:
-                    if isinstance(c, dict):
-                        c_code = str(c.get("key") or c.get("code") or "")
-                        clean_c = c_code.split('-')[0].strip()
-                        for my_cpv in CPV_CODES:
-                            if clean_c and clean_c in my_cpv:
-                                matched_cpv = c_code
-                                break
-                    if matched_cpv != "—":
-                        break
-                        
-                all_tenders[adam] = {
-                    "esidis_id": adam, # Στο ΚΗΜΔΗΣ αυτό είναι ο ΑΔΑΜ
-                    "title": title,
-                    "url": f"https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice/attachment/{adam}", # Link στο PDF
-                    "contracting_authority": org,
-                    "deadline": deadline,
-                    "deadline_raw": deadline_raw,
-                    "budget": budget_str,
-                    "cpv_matched": matched_cpv,
-                    "scraped_at": datetime.now().isoformat()
-                }
-            
-            if data.get("last") is True:
+                if data.get("last") is True: break
+                page += 1
+                
+            except Exception as e:
+                log.error(f"Σφάλμα: {e}")
                 break
-            page += 1
-            
-        except Exception as e:
-            log.error(f"Σφάλμα στο API: {e}")
-            break
-            
-    # Αποθήκευση - Κάνουμε overwrite τα πάντα αφού πλέον τραβάμε 100% φρέσκα δεδομένα
+
+    # Αποθήκευση στο JSON (κάνει πάντα overwrite με τη νέα αναζήτηση)
     payload_to_save = {
+        "date_searched": target_date,
         "last_updated": datetime.now().isoformat(),
         "total": len(all_tenders),
-        "tenders": sorted(all_tenders.values(), key=lambda x: x.get("deadline") or "9999-12-31")
+        "tenders": all_tenders
     }
     
     with open(RESULTS_FILE, "w", encoding="utf-8") as f:
         json.dump(payload_to_save, f, ensure_ascii=False, indent=2)
         
-    log.info(f"Ολοκληρώθηκε! Αποθηκεύτηκαν {len(all_tenders)} διαγωνισμοί.")
+    log.info(f"Ολοκληρώθηκε! Βρέθηκαν {len(all_tenders)} δημοσιεύσεις.")
     log.info("=" * 60)
 
 if __name__ == "__main__":
