@@ -1,8 +1,3 @@
-"""
-ΚΗΜΔΗΣ Opendata API Scraper - On Demand Edition
-Αναζήτηση δημοσιεύσεων της "προηγούμενης ημέρας" με εξαγωγή PDF.
-"""
-
 import json
 import logging
 import sys
@@ -34,7 +29,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(
 log = logging.getLogger(__name__)
 
 def extract_pdf_text(adam):
-    """Κατεβάζει το PDF από το ΚΗΜΔΗΣ και εξάγει τις πρώτες 3 σελίδες ως κείμενο."""
     url = f"{API_BASE}/khmdhs-opendata/notice/attachment/{adam}"
     try:
         res = requests.get(url, timeout=20)
@@ -52,16 +46,35 @@ def extract_pdf_text(adam):
                 return "Το PDF είναι σκαναρισμένη εικόνα. Αδυναμία εξαγωγής κειμένου."
             return clean_text
     except Exception as e:
-        log.error(f"Σφάλμα ανάγνωσης PDF για {adam}: {e}")
+        log.error(f"Σφάλμα PDF για {adam}: {e}")
     return "Αδυναμία λήψης αρχείου."
+
+def get_budget(item):
+    """Ψάχνει επιθετικά σε όλα τα πιθανά πεδία του JSON για τον προϋπολογισμό."""
+    possible_keys = ["amountWithoutVat", "estimatedValue", "totalAmount", "contractValue", "totalCost", "amountWithVat"]
+    
+    # 1. Ψάχνει στο βασικό επίπεδο
+    for key in possible_keys:
+        val = item.get(key)
+        if val: return val
+        
+    # 2. Ψάχνει μέσα στο αντικείμενο 'budget' (αν υπάρχει)
+    budget_obj = item.get("budget")
+    if isinstance(budget_obj, dict):
+        for key in possible_keys + ["value", "amount"]:
+            val = budget_obj.get(key)
+            if val: return val
+            
+    return 0
 
 def run():
     log.info("=" * 60)
-    # Υπολογισμός "χθεσινής" ημερομηνίας (δηλαδή της προηγούμενης μέρας από την εκτέλεση)
-    yesterday = datetime.now() - timedelta(days=1)
-    target_date = yesterday.strftime("%Y-%m-%d")
+    # Από 2 μέρες πίσω έως σήμερα (σύνολο 3 ημέρες)
+    today = datetime.now()
+    date_from = (today - timedelta(days=2)).strftime("%Y-%m-%d")
+    date_to = today.strftime("%Y-%m-%d")
     
-    log.info(f"ΕΚΚΙΝΗΣΗ ΚΗΜΔΗΣ API (On Demand) - Αναζήτηση δημοσιεύσεων για: {target_date}")
+    log.info(f"Αναζήτηση δημοσιεύσεων από {date_from} έως {date_to}")
     
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     all_tenders = []
@@ -70,14 +83,15 @@ def run():
         log.info(f"-> Ελέγχω CPV: {cpv}")
         payload = {
             "cpvItems": [cpv],
-            "dateFrom": target_date,
-            "dateTo": target_date
+            "dateFrom": date_from,
+            "dateTo": date_to
         }
         
         page = 0
         while True:
             try:
-                res = requests.post(f"{SEARCH_ENDPOINT}?page={page}", json=payload, headers=headers, timeout=15)
+                # Ζητάμε 200 αποτελέσματα ανά σελίδα για να μη χάνουμε τίποτα!
+                res = requests.post(f"{SEARCH_ENDPOINT}?page={page}&size=200", json=payload, headers=headers, timeout=20)
                 if not res.ok: break
                 
                 data = res.json()
@@ -88,7 +102,6 @@ def run():
                     adam = item.get("referenceNumber") or item.get("sysCode")
                     if not adam: continue
                     
-                    # Αποφυγή διπλοτυπιών
                     if any(t['adam'] == adam for t in all_tenders):
                         continue
                     
@@ -101,7 +114,8 @@ def run():
                     else:
                         org = str(org_val)
                         
-                    budget_num = item.get("amountWithoutVat") or 0
+                    # Εξαγωγή Προϋπολογισμού με τη νέα έξυπνη συνάρτηση
+                    budget_num = get_budget(item)
                     if budget_num:
                         try:
                             budget_str = f"{float(budget_num):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -113,6 +127,11 @@ def run():
                     log.info(f"    Βρέθηκε: {adam} - Κατέβασμα κειμένου...")
                     pdf_text = extract_pdf_text(adam)
                     
+                    # Ημερομηνία Δημοσίευσης (στο ΚΗΜΔΗΣ)
+                    pub_date = item.get("issueDate") or item.get("protocolDate") or "—"
+                    if pub_date and "T" in pub_date:
+                        pub_date = pub_date.split("T")[0]
+                    
                     all_tenders.append({
                         "adam": adam,
                         "ada": ada,
@@ -122,7 +141,7 @@ def run():
                         "cpv_matched": cpv,
                         "pdf_url": f"{API_BASE}/khmdhs-opendata/notice/attachment/{adam}",
                         "pdf_text": pdf_text,
-                        "published_date": target_date
+                        "published_date": pub_date
                     })
                 
                 if data.get("last") is True: break
@@ -132,9 +151,8 @@ def run():
                 log.error(f"Σφάλμα: {e}")
                 break
 
-    # Αποθήκευση στο JSON (κάνει πάντα overwrite με τη νέα αναζήτηση)
     payload_to_save = {
-        "date_searched": target_date,
+        "date_searched": f"{date_from} έως {date_to}",
         "last_updated": datetime.now().isoformat(),
         "total": len(all_tenders),
         "tenders": all_tenders
